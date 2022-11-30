@@ -4,17 +4,26 @@ use iced::executor;
 use iced::keyboard;
 use iced::theme::{self, Theme};
 use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, pick_list};
 use iced::{
     Application, Color, Command, Element, Length, Settings, Size, Subscription
 };
 use iced_lazy::responsive;
 use iced_native::{event, subscription, Event};
 
+use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 pub fn main() -> iced::Result {
-    Example::run(Settings::default())
+    // Example::run(Settings::default())
+    Example::run(Settings {
+        window: iced::window::Settings {
+            size: (800, 600),
+            ..Default::default()
+        },
+        flags: (),
+        ..Default::default()
+    })
 }
 
 struct Example {
@@ -39,6 +48,7 @@ enum Message {
     Close(pane_grid::Pane),
     CloseFocused,
     Tick(Instant),
+    ChangeType(pane_grid::Pane, PaneType),
 }
 
 impl Application for Example {
@@ -63,7 +73,7 @@ impl Application for Example {
     }
 
     fn title(&self) -> String {
-        String::from("Pane grid - Iced")
+        String::from("Dashboard")
     }
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
@@ -153,6 +163,12 @@ impl Application for Example {
                     self.ticks += 1;
                 }
             }
+            Message::ChangeType(pane, new_pane_type) => {
+                if let Some(Pane { pane_type, ..}) = self.panes.get_mut(&pane)
+                {
+                    *pane_type = new_pane_type;
+                }
+            }
         }
 
         Command::none()
@@ -199,7 +215,8 @@ impl Application for Example {
                     id,
                     total_panes,
                     pane.is_pinned,
-                    maximized
+                    maximized,
+                    pane.pane_type,
                 ))
                 .padding(10)
                 .style(if is_focused {
@@ -209,7 +226,14 @@ impl Application for Example {
                 });
             
             pane_grid::Content::new(responsive(move |size| {
-                view_content(id, total_panes, pane.is_pinned, size, self.ticks)
+                view_content(
+                    id,
+                    total_panes,
+                    pane.is_pinned,
+                    size,
+                    self.ticks,
+                    pane.pane_type,
+                )
             }))
             .title_bar(title_bar)
             .style(if is_focused {
@@ -253,9 +277,18 @@ fn handle_hotkey(key_code: keyboard::KeyCode) -> Option<Message> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneType {
+    Selection,
+    CPU,
+    Memory,
+    Disks,
+}
+
 struct Pane {
     id: usize,
     pub is_pinned: bool,
+    pane_type: PaneType,
 }
 
 impl Pane {
@@ -263,6 +296,51 @@ impl Pane {
         Self {
             id,
             is_pinned: false,
+            pane_type: PaneType::Selection,
+        }
+    }
+}
+
+impl PaneType {
+    fn content<'a>(&self) -> Element<'a, Message> {
+        match *self {
+            PaneType::Selection => {
+                text("Select pane type").size(16).into()
+            }
+            PaneType::CPU => {
+                text("CPU").size(16).into()
+            }
+            PaneType::Memory => {
+                text("Memory").size(16).into()
+            }
+            PaneType::Disks => {
+                text("Disks").size(16).into()
+            }
+        }
+    }
+    const ALL: [PaneType; 4] = [
+        PaneType::Selection,
+        PaneType::CPU,
+        PaneType::Memory,
+        PaneType::Disks,
+    ];
+}
+
+impl Display for PaneType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            PaneType::Selection => {
+                write!(f, "Select pane type")
+            }
+            PaneType::CPU => {
+                write!(f, "CPU")
+            }
+            PaneType::Memory => {
+                write!(f, "Memory")
+            }
+            PaneType::Disks => {
+                write!(f, "Disks")
+            }
         }
     }
 }
@@ -284,6 +362,7 @@ fn view_content<'a>(
     is_pinned: bool,
     size: Size,
     ticks: usize,
+    pane_type: PaneType,
 ) -> Element<'a, Message> {
     let button = |label, message| {
         button(
@@ -318,6 +397,7 @@ fn view_content<'a>(
     }
 
     let content = column![
+        pane_type.content(),
         text(format!("{} ticks", ticks)).size(16),
         text(format!("{}x{}", size.width, size.height)).size(24),
         controls,
@@ -339,8 +419,17 @@ fn view_controls<'a>(
     total_panes: usize,
     is_pinned: bool,
     is_maximized: bool,
+    pane_type: PaneType,
 ) -> Element<'a, Message> {
     let mut row = row![].spacing(5);
+
+    let pick_list = pick_list(
+        &PaneType::ALL[..],
+        Some(pane_type),
+        move |new_type| Message::ChangeType(pane, new_type),
+    );
+
+    row = row.push(pick_list);
 
     if total_panes > 1 {
         let toggle = {

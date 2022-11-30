@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 #iced = { path = "../..", features = ["debug"] }
-iced = { version = "0.5", features = ["debug", "smol"] }
+iced = { version = "0.5", features = ["debug", "smol", "glow"] }
 iced_native = { version = "0.6.1" }
 iced_lazy = { version = "0.2.0" }
 # time = { version = "0.3.17", features = ["local-offset"] }
