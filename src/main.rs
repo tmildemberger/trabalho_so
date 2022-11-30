@@ -11,6 +11,8 @@ use iced::{
 use iced_lazy::responsive;
 use iced_native::{event, subscription, Event};
 
+use std::time::{Duration, Instant};
+
 pub fn main() -> iced::Result {
     Example::run(Settings::default())
 }
@@ -19,6 +21,8 @@ struct Example {
     panes: pane_grid::State<Pane>,
     panes_created: usize,
     focus: Option<pane_grid::Pane>,
+    now: Instant,
+    ticks: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +38,7 @@ enum Message {
     Restore,
     Close(pane_grid::Pane),
     CloseFocused,
+    Tick(Instant),
 }
 
 impl Application for Example {
@@ -50,6 +55,8 @@ impl Application for Example {
                 panes,
                 panes_created: 1,
                 focus: None,
+                now: Instant::now(),
+                ticks: 0,
             },
             Command::none(),
         )
@@ -138,25 +145,36 @@ impl Application for Example {
                     }
                 }
             }
+            Message::Tick(now) => {
+                // let now = local_time;
+
+                if now != self.now {
+                    self.now = now;
+                    self.ticks += 1;
+                }
+            }
         }
 
         Command::none()
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        subscription::events_with(|event, status| {
-            if let event::Status::Captured = status {
-                return None;
-            }
+        Subscription::batch([
+            subscription::events_with(|event, status| {
+                if let event::Status::Captured = status {
+                    return None;
+                }
 
-            match event {
-                Event::Keyboard(keyboard::Event::KeyPressed {
-                    key_code,
-                    modifiers,
-                }) if modifiers.command() => handle_hotkey(key_code),
-                _ => None,
-            }
-        })
+                match event {
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key_code,
+                        modifiers,
+                    }) if modifiers.command() => handle_hotkey(key_code),
+                    _ => None,
+                }
+            }),
+            iced::time::every(Duration::from_secs(2)).map(Message::Tick)
+        ])
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
@@ -191,7 +209,7 @@ impl Application for Example {
                 });
             
             pane_grid::Content::new(responsive(move |size| {
-                view_content(id, total_panes, pane.is_pinned, size)
+                view_content(id, total_panes, pane.is_pinned, size, self.ticks)
             }))
             .title_bar(title_bar)
             .style(if is_focused {
@@ -265,6 +283,7 @@ fn view_content<'a>(
     total_panes: usize,
     is_pinned: bool,
     size: Size,
+    ticks: usize,
 ) -> Element<'a, Message> {
     let button = |label, message| {
         button(
@@ -299,6 +318,7 @@ fn view_content<'a>(
     }
 
     let content = column![
+        text(format!("{} ticks", ticks)).size(16),
         text(format!("{}x{}", size.width, size.height)).size(24),
         controls,
     ]
