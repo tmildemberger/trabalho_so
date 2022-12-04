@@ -12,26 +12,96 @@ use iced_lazy::responsive;
 use iced_native::{event, subscription, Event};
 
 use std::fmt::Display;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::thread;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn main() -> iced::Result {
     // Example::run(Settings::default())
+    let shared_tick = Arc::new(AtomicU64::new(0));
+    let thread_tick = Arc::clone(&shared_tick);
+
+    let shared_data = Arc::new(Mutex::new(CollectedData::default()));
+    let thread_data = Arc::clone(&shared_data);
+
+    thread::spawn(move || {
+        loop {
+            collect_data(&thread_data);
+            thread_tick.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
+
     Example::run(Settings {
         window: iced::window::Settings {
             size: (800, 600),
             ..Default::default()
         },
-        flags: (),
+        flags: (shared_data, shared_tick),
         ..Default::default()
     })
+}
+
+fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
+    let mut data = shared_data.lock().unwrap();
+
+    (*data).cpu_usage = match (*data).tick % 4 {
+        0 => vec![22.0, 33.3, 75.9, 0.0],
+        1 => vec![33.3, 75.9, 0.0, 22.0],
+        2 => vec![75.9, 0.0, 22.0, 33.3],
+        3 => vec![0.0, 22.0, 33.3, 75.9],
+        _ => vec![22.0, 33.3, 75.9, 0.0],
+    };
+    (*data).ram_usage = Some(68.4);
+    (*data).disk_usage = vec![94.1];
+    
+    let mut process_list = vec![];
+    process_list.push(ProcessInfo {
+        pid: 1,
+        name: String::from("init"),
+        cmd: String::from(""),
+        cpu: 1.2,
+        memory: 8,
+    });
+    process_list.push(ProcessInfo {
+        pid: 1501,
+        name: String::from("Firefox Developer Edition"),
+        cmd: String::from("fox&"),
+        cpu: 54.3,
+        memory: 835584,
+    });
+    (*data).process_list = process_list;
+
+    (*data).tick += 1;
+}
+
+#[derive(Default, Clone)]
+struct ProcessInfo {
+    pid: usize,
+    name: String,
+    cmd: String,
+    cpu: f64,
+    memory: u64,
+}
+
+#[derive(Default, Clone)]
+struct CollectedData {
+    cpu_usage: Vec<f64>,
+    ram_usage: Option<f64>,
+    disk_usage: Vec<f64>,
+    process_list: Vec<ProcessInfo>,
+    tick: u64,
 }
 
 struct Example {
     panes: pane_grid::State<Pane>,
     panes_created: usize,
     focus: Option<pane_grid::Pane>,
-    now: Instant,
-    ticks: usize,
+    last_tick: u64,
+    shared_data: Arc<Mutex<CollectedData>>,
+    shared_tick: Arc<AtomicU64>,
+    current_data_copy: CollectedData,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +117,7 @@ enum Message {
     Restore,
     Close(pane_grid::Pane),
     CloseFocused,
-    Tick(Instant),
+    Tick,
     ChangeType(pane_grid::Pane, PaneType),
 }
 
@@ -55,9 +125,9 @@ impl Application for Example {
     type Message = Message;
     type Theme = Theme;
     type Executor = executor::Default;
-    type Flags = ();
+    type Flags = (Arc<Mutex<CollectedData>>, Arc<AtomicU64>);
 
-    fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
+    fn new(flags: Self::Flags) -> (Self, Command<Self::Message>) {
         let (panes, _) = pane_grid::State::new(Pane::new(0));
 
         (
@@ -65,8 +135,10 @@ impl Application for Example {
                 panes,
                 panes_created: 1,
                 focus: None,
-                now: Instant::now(),
-                ticks: 0,
+                last_tick: 0,
+                shared_data: flags.0,
+                shared_tick: flags.1,
+                current_data_copy: CollectedData::default(),
             },
             Command::none(),
         )
@@ -155,12 +227,12 @@ impl Application for Example {
                     }
                 }
             }
-            Message::Tick(now) => {
-                // let now = local_time;
-
-                if now != self.now {
-                    self.now = now;
-                    self.ticks += 1;
+            Message::Tick => {
+                let current_tick = self.shared_tick.load(Ordering::SeqCst);
+                if self.last_tick != current_tick {
+                    self.last_tick = current_tick;
+                    let data = self.shared_data.lock().unwrap();
+                    self.current_data_copy = (*data).clone();
                 }
             }
             Message::ChangeType(pane, new_pane_type) => {
@@ -189,7 +261,7 @@ impl Application for Example {
                     _ => None,
                 }
             }),
-            iced::time::every(Duration::from_secs(2)).map(Message::Tick)
+            iced::time::every(Duration::from_secs_f64(1.0/60.0)).map(|_| Message::Tick)
         ])
     }
 
@@ -231,8 +303,8 @@ impl Application for Example {
                     total_panes,
                     pane.is_pinned,
                     size,
-                    self.ticks,
                     pane.pane_type,
+                    &self.current_data_copy,
                 )
             }))
             .title_bar(title_bar)
@@ -302,19 +374,56 @@ impl Pane {
 }
 
 impl PaneType {
-    fn content<'a>(&self) -> Element<'a, Message> {
+    fn content<'a>(&self, data: &CollectedData) -> Element<'a, Message> {
         match *self {
             PaneType::Selection => {
                 text("Select pane type").size(16).into()
             }
             PaneType::CPU => {
-                text("CPU").size(16).into()
+                let mut content = column![
+                    text("CPU").size(24),
+                ]
+                .width(Length::Fill)
+                .spacing(10)
+                .align_items(Alignment::Center);
+
+                let mut i = 0;
+                for cpu in &data.cpu_usage {
+                    content = content.push(text(format!("CPU {}: {}%", i, cpu)).size(16));
+                    i += 1;
+                }
+
+                content.into()
             }
             PaneType::Memory => {
-                text("Memory").size(16).into()
+                let mut content = column![
+                    text("Memory").size(24),
+                ]
+                .width(Length::Fill)
+                .spacing(10)
+                .align_items(Alignment::Center);
+
+                if let Some(memory) = data.ram_usage {
+                    content = content.push(text(format!("RAM: {}%", memory)).size(16));
+                }
+                
+                content.into()
             }
             PaneType::Disks => {
-                text("Disks").size(16).into()
+                let mut content = column![
+                    text("Disks").size(24),
+                ]
+                .width(Length::Fill)
+                .spacing(10)
+                .align_items(Alignment::Center);
+
+                let mut i = 0;
+                for disk in &data.disk_usage {
+                    content = content.push(text(format!("Disk {}: {}%", i, disk)).size(16));
+                    i += 1;
+                }
+                
+                content.into()
             }
         }
     }
@@ -361,8 +470,8 @@ fn view_content<'a>(
     total_panes: usize,
     is_pinned: bool,
     size: Size,
-    ticks: usize,
     pane_type: PaneType,
+    current_data: &CollectedData,
 ) -> Element<'a, Message> {
     let button = |label, message| {
         button(
@@ -397,8 +506,7 @@ fn view_content<'a>(
     }
 
     let content = column![
-        pane_type.content(),
-        text(format!("{} ticks", ticks)).size(16),
+        pane_type.content(current_data),
         text(format!("{}x{}", size.width, size.height)).size(24),
         controls,
     ]
