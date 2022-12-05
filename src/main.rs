@@ -17,6 +17,7 @@ use plotters_iced::{Chart, ChartWidget};
 
 use std::collections::VecDeque;
 use std::fmt::Display;
+use std::io::BufReader;
 use std::time::Duration;
 use std::thread;
 use std::sync::{Arc, Mutex};
@@ -563,10 +564,6 @@ impl PaneType {
                     cpu = cpu.push(text(format!("{}", task.cpu)).size(16));
                     memory = memory.push(text(format!("{}", task.memory)).size(16));
                     cmd = cmd.push(text(format!("{}", task.cmd)).size(16).height(Length::Units(16)));
-
-                    let t: iced_native::widget::Text<iced::Renderer> = text(format!("{}", task.cmd)).size(16).height(Length::Units(16));
-                    // cmd = cmd.push(t);
-                    println!("{:?}", <dyn iced_native::widget::Widget<Message, iced::Renderer>>::width(&t));
                 }
 
                 let content = row![
