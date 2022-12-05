@@ -3,6 +3,7 @@ use iced::alignment::{self, Alignment};
 use iced::executor;
 use iced::keyboard;
 use iced::theme::{self, Theme};
+use iced::widget::canvas::{Cache, Frame, Geometry};
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{button, column, container, row, scrollable, text, pick_list};
 use iced::{
@@ -10,12 +11,18 @@ use iced::{
 };
 use iced_lazy::responsive;
 use iced_native::{event, subscription, Event};
+use plotters::prelude::ChartBuilder;
+use plotters_iced::plotters_backend::DrawingBackend;
+use plotters_iced::{Chart, ChartWidget};
 
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::time::Duration;
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+const MAX_POINTS: usize = 64;
 
 pub fn main() -> iced::Result {
     // Example::run(Settings::default())
@@ -29,7 +36,7 @@ pub fn main() -> iced::Result {
         loop {
             collect_data(&thread_data);
             thread_tick.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_secs(5));
+            thread::sleep(Duration::from_secs(3));
         }
     });
 
@@ -39,6 +46,8 @@ pub fn main() -> iced::Result {
             ..Default::default()
         },
         flags: (shared_data, shared_tick),
+        text_multithreading: true,
+        antialiasing: true,
         ..Default::default()
     })
 }
@@ -46,15 +55,27 @@ pub fn main() -> iced::Result {
 fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
     let mut data = shared_data.lock().unwrap();
 
-    (*data).cpu_usage = match (*data).tick % 4 {
+    if (*data).cpu_usage.len() == 0 {
+        for _i in 0..4 {
+            (*data).cpu_usage.push(VecDeque::new());
+        }
+    }
+
+    let new_cpu_points = match (*data).tick % 4 {
         0 => vec![22.0, 33.3, 75.9, 0.0],
         1 => vec![33.3, 75.9, 0.0, 22.0],
         2 => vec![75.9, 0.0, 22.0, 33.3],
         3 => vec![0.0, 22.0, 33.3, 75.9],
         _ => vec![22.0, 33.3, 75.9, 0.0],
     };
+    for i in 0..4 {
+        (*data).cpu_usage[i].push_front(new_cpu_points[i]);
+        if (*data).cpu_usage[i].len() >= MAX_POINTS {
+            (*data).cpu_usage[i].pop_back();
+        }
+    }
     (*data).ram_usage = Some(68.4);
-    (*data).disk_usage = vec![94.1];
+    (*data).disk_usage = vec![94.1, 22.2];
     
     let mut process_list = vec![];
     process_list.push(ProcessInfo {
@@ -87,11 +108,18 @@ struct ProcessInfo {
 
 #[derive(Default, Clone)]
 struct CollectedData {
-    cpu_usage: Vec<f64>,
+    cpu_usage: Vec<VecDeque<f64>>,
     ram_usage: Option<f64>,
     disk_usage: Vec<f64>,
     process_list: Vec<ProcessInfo>,
     tick: u64,
+}
+
+#[derive(Default)]
+struct LocalData {
+    current_data_copy: CollectedData,
+    cpu_charts: Vec<CpuUsageChart>,
+    disk_charts: Vec<DiskUsageChart>,
 }
 
 struct Example {
@@ -101,7 +129,7 @@ struct Example {
     last_tick: u64,
     shared_data: Arc<Mutex<CollectedData>>,
     shared_tick: Arc<AtomicU64>,
-    current_data_copy: CollectedData,
+    local_data: LocalData,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +149,27 @@ enum Message {
     ChangeType(pane_grid::Pane, PaneType),
 }
 
+impl LocalData {
+    fn update_cpus(&mut self) {
+        while self.current_data_copy.cpu_usage.len() > self.cpu_charts.len() {
+            self.cpu_charts.push(CpuUsageChart::new(MAX_POINTS));
+        }
+        for (i, chart) in self.cpu_charts.iter_mut().enumerate() {
+            chart.set_data(self.current_data_copy.cpu_usage[i].clone().into_iter());
+        }
+    }
+
+    fn update_disks(&mut self) {
+        while self.current_data_copy.disk_usage.len() > self.disk_charts.len() {
+            self.disk_charts.push(DiskUsageChart::new());
+        }
+        for (i, chart) in self.disk_charts.iter_mut().enumerate() {
+            let used = self.current_data_copy.disk_usage[i];
+            chart.set_data((used, 100.0 - used));
+        }
+    }
+}
+
 impl Application for Example {
     type Message = Message;
     type Theme = Theme;
@@ -138,7 +187,11 @@ impl Application for Example {
                 last_tick: 0,
                 shared_data: flags.0,
                 shared_tick: flags.1,
-                current_data_copy: CollectedData::default(),
+                local_data: LocalData {
+                    current_data_copy: CollectedData::default(),
+                    cpu_charts: Vec::new(),
+                    disk_charts: Vec::new(),
+                },
             },
             Command::none(),
         )
@@ -232,7 +285,9 @@ impl Application for Example {
                 if self.last_tick != current_tick {
                     self.last_tick = current_tick;
                     let data = self.shared_data.lock().unwrap();
-                    self.current_data_copy = (*data).clone();
+                    self.local_data.current_data_copy = (*data).clone();
+                    self.local_data.update_cpus();
+                    self.local_data.update_disks();
                 }
             }
             Message::ChangeType(pane, new_pane_type) => {
@@ -304,7 +359,7 @@ impl Application for Example {
                     pane.is_pinned,
                     size,
                     pane.pane_type,
-                    &self.current_data_copy,
+                    &self.local_data,
                 )
             }))
             .title_bar(title_bar)
@@ -352,7 +407,7 @@ fn handle_hotkey(key_code: keyboard::KeyCode) -> Option<Message> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaneType {
     Selection,
-    CPU,
+    Cpu,
     Memory,
     Disks,
 }
@@ -374,12 +429,12 @@ impl Pane {
 }
 
 impl PaneType {
-    fn content<'a>(&self, data: &CollectedData) -> Element<'a, Message> {
+    fn content<'a>(&self, data: &'a LocalData) -> Element<'a, Message> {
         match *self {
             PaneType::Selection => {
                 text("Select pane type").size(16).into()
             }
-            PaneType::CPU => {
+            PaneType::Cpu => {
                 let mut content = column![
                     text("CPU").size(24),
                 ]
@@ -388,8 +443,14 @@ impl PaneType {
                 .align_items(Alignment::Center);
 
                 let mut i = 0;
-                for cpu in &data.cpu_usage {
-                    content = content.push(text(format!("CPU {}: {}%", i, cpu)).size(16));
+                for cpu_chart in &data.cpu_charts {
+                    let row = row(vec![cpu_chart.view(i)])
+                        .spacing(5)
+                        .padding(5)
+                        .width(Length::Fill)
+                        .height(Length::Units(300))
+                        .align_items(Alignment::Center);
+                    content = content.push(row);
                     i += 1;
                 }
 
@@ -403,7 +464,7 @@ impl PaneType {
                 .spacing(10)
                 .align_items(Alignment::Center);
 
-                if let Some(memory) = data.ram_usage {
+                if let Some(memory) = data.current_data_copy.ram_usage {
                     content = content.push(text(format!("RAM: {}%", memory)).size(16));
                 }
                 
@@ -418,18 +479,24 @@ impl PaneType {
                 .align_items(Alignment::Center);
 
                 let mut i = 0;
-                for disk in &data.disk_usage {
-                    content = content.push(text(format!("Disk {}: {}%", i, disk)).size(16));
+                for disk_chart in &data.disk_charts {
+                    let row = row(vec![disk_chart.view(i)])
+                        .spacing(5)
+                        .padding(5)
+                        .width(Length::Fill)
+                        .height(Length::Units(300))
+                        .align_items(Alignment::Center);
+                    content = content.push(row);
                     i += 1;
                 }
-                
+
                 content.into()
             }
         }
     }
     const ALL: [PaneType; 4] = [
         PaneType::Selection,
-        PaneType::CPU,
+        PaneType::Cpu,
         PaneType::Memory,
         PaneType::Disks,
     ];
@@ -441,7 +508,7 @@ impl Display for PaneType {
             PaneType::Selection => {
                 write!(f, "Select pane type")
             }
-            PaneType::CPU => {
+            PaneType::Cpu => {
                 write!(f, "CPU")
             }
             PaneType::Memory => {
@@ -471,7 +538,7 @@ fn view_content<'a>(
     is_pinned: bool,
     size: Size,
     pane_type: PaneType,
-    current_data: &CollectedData,
+    local_data: &'a LocalData,
 ) -> Element<'a, Message> {
     let button = |label, message| {
         button(
@@ -506,7 +573,7 @@ fn view_content<'a>(
     }
 
     let content = column![
-        pane_type.content(current_data),
+        pane_type.content(local_data),
         text(format!("{}x{}", size.width, size.height)).size(24),
         controls,
     ]
@@ -572,6 +639,203 @@ fn view_controls<'a>(
     }
 
     row.push(close).into()
+}
+
+
+struct CpuUsageChart {
+    cache: Cache,
+    data_points: VecDeque<f64>,
+    max_points: usize,
+}
+
+impl CpuUsageChart {
+    fn new(max_points: usize) -> Self {
+        Self {
+            cache: Cache::new(),
+            data_points: VecDeque::new(),
+            max_points,
+        }
+    }
+
+    fn set_data(&mut self, value: impl Iterator<Item = f64>) {
+        self.data_points = value.collect();
+
+        while self.data_points.len() >= self.max_points {
+            self.data_points.pop_back();
+        }
+
+        self.cache.clear();
+    }
+
+    fn view(&self, idx: usize) -> Element<Message> {
+        container(
+            column(Vec::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .spacing(5)
+                .push(text(format!("CPU {}", idx)))
+                .push(
+                    ChartWidget::new(self).height(Length::Fill),
+                ),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center)
+        .into()
+    }
+}
+
+impl Chart<Message> for CpuUsageChart {
+    type State = ();
+    // fn update(
+    //     &mut self,
+    //     event: Event,
+    //     bounds: Rectangle,
+    //     cursor: Cursor,
+    // ) -> (event::Status, Option<Message>) {
+    //     self.cache.clear();
+    //     (event::Status::Ignored, None)
+    // }
+
+    #[inline]
+    fn draw<F: Fn(&mut Frame)>(&self, bounds: Size, draw_fn: F) -> Geometry {
+        self.cache.draw(bounds, draw_fn)
+    }
+
+    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, mut chart: ChartBuilder<DB>) {
+        use plotters::{prelude::*, style::Color};
+
+        const PLOT_LINE_COLOR: RGBColor = RGBColor(0, 175, 255);
+        let start = self.max_points - self.data_points.len();
+
+        let mut chart = chart
+            .x_label_area_size(0)
+            .y_label_area_size(28)
+            .margin(20)
+            .build_cartesian_2d(1..self.max_points, 0f64..100.0)
+            .expect("failed to build chart");
+
+        chart
+            .configure_mesh()
+            .bold_line_style(plotters::style::colors::BLUE.mix(0.1))
+            .light_line_style(plotters::style::colors::BLUE.mix(0.05))
+            .axis_style(ShapeStyle::from(plotters::style::colors::BLUE.mix(0.45)).stroke_width(1))
+            .y_labels(10)
+            .y_label_style(
+                ("sans-serif", 15)
+                    .into_font()
+                    .color(&plotters::style::colors::BLUE.mix(0.65))
+                    .transform(FontTransform::Rotate90),
+            )
+            .y_label_formatter(&|y| format!("{}%", y))
+            .draw()
+            .expect("failed to draw chart mesh");
+
+        chart
+            .draw_series(
+                AreaSeries::new(
+                    self.data_points.iter().enumerate().map(|(x, y)| (x + 1 + start, *y)),
+                    0.0,
+                    PLOT_LINE_COLOR.mix(0.175),
+                )
+                .border_style(ShapeStyle::from(PLOT_LINE_COLOR).stroke_width(2)),
+            )
+            .expect("failed to draw chart data");
+    }
+}
+
+
+struct DiskUsageChart {
+    cache: Cache,
+    data_points: (f64, f64),
+}
+
+impl DiskUsageChart {
+    fn new() -> Self {
+        Self {
+            cache: Cache::new(),
+            data_points: (0.0, 100.0),
+        }
+    }
+
+    fn set_data(&mut self, value: (f64, f64)) {
+        self.data_points = value;
+        self.cache.clear();
+    }
+
+    fn view(&self, idx: usize) -> Element<Message> {
+        container(
+            column(Vec::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .spacing(5)
+                .push(text(format!("Disk {}", idx)))
+                .push(
+                    ChartWidget::new(self).height(Length::Fill),
+                ),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center)
+        .into()
+    }
+}
+
+impl Chart<Message> for DiskUsageChart {
+    type State = ();
+    // fn update(
+    //     &mut self,
+    //     event: Event,
+    //     bounds: Rectangle,
+    //     cursor: Cursor,
+    // ) -> (event::Status, Option<Message>) {
+    //     self.cache.clear();
+    //     (event::Status::Ignored, None)
+    // }
+
+    #[inline]
+    fn draw<F: Fn(&mut Frame)>(&self, bounds: Size, draw_fn: F) -> Geometry {
+        self.cache.draw(bounds, draw_fn)
+    }
+
+    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, mut chart: ChartBuilder<DB>) {
+        use plotters::prelude::*;
+        
+        const USED_COLOR: RGBColor = RGBColor(255, 222, 153);
+        const FREE_COLOR: RGBColor = RGBColor(153, 222, 255);
+
+        let mut chart = chart
+            .x_label_area_size(0)
+            .y_label_area_size(0)
+            .margin(5)
+            .build_cartesian_2d(0..300, 0..300)
+            .expect("failed to build chart");
+            
+        chart
+            .configure_mesh()
+            .disable_x_mesh()
+            .disable_y_mesh()
+            .draw()
+            .expect("failed to draw chart mesh");
+
+        let area = chart.plotting_area();
+        let dims = area.dim_in_pixel();
+        let center = (dims.0 as i32 / 2, dims.1 as i32 / 2);
+        let radius = 100.0;
+        let sizes = vec![self.data_points.1, self.data_points.0];
+        let colors = vec![FREE_COLOR, USED_COLOR];
+        let labels = vec!["Free", "Used"];
+
+        let mut pie = Pie::new(&center, &radius, &sizes, &colors, &labels);
+        pie.start_angle(-90.0);
+        pie.label_style((("sans-serif", 16).into_font()).color(&(BLACK)));
+        pie.percentages((("sans-serif", radius * 0.32).into_font()).color(&BLACK));
+        area.draw(&pie)
+            .expect("failed to draw pie graph");
+
+    }
 }
 
 mod style {

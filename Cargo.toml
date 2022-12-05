@@ -2,12 +2,14 @@
 name = "trabalho_so"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iced = { version = "0.5", features = ["debug", "smol", "glow", "canvas"] }
-iced_native = { version = "0.6" }
-iced_lazy = { version = "0.2" }
-plotters-iced = "0.4"
-plotters = "0.3"
+iced = { version = "0.5.2", features = ["debug", "smol", "glow", "canvas"] }
+iced_native = { version = "0.6.1" }
+iced_lazy = { version = "0.2.0" }
+plotters-iced = "0.4.1"
+plotters = { version = "0.3.4", default-features = false, features = ["all_series",
+    "all_elements", "full_palette"] }
