@@ -22,7 +22,7 @@ use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_POINTS: usize = 64;
+const MAX_POINTS: usize = 60;
 
 pub fn main() -> iced::Result {
     // Example::run(Settings::default())
@@ -36,7 +36,7 @@ pub fn main() -> iced::Result {
         loop {
             collect_data(&thread_data);
             thread_tick.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_secs(3));
+            thread::sleep(Duration::from_secs(1));
         }
     });
 
@@ -70,7 +70,7 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
     };
     for i in 0..4 {
         (*data).cpu_usage[i].push_front(new_cpu_points[i]);
-        if (*data).cpu_usage[i].len() >= MAX_POINTS {
+        if (*data).cpu_usage[i].len() > MAX_POINTS {
             (*data).cpu_usage[i].pop_back();
         }
     }
@@ -81,18 +81,39 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
     process_list.push(ProcessInfo {
         pid: 1,
         name: String::from("init"),
-        cmd: String::from(""),
+        status: String::from("Idle"),
+        user: String::from("root"),
         cpu: 1.2,
-        memory: 8,
+        memory: 0.1,
+        cmd: String::from(""),
     });
     process_list.push(ProcessInfo {
         pid: 1501,
         name: String::from("Firefox Developer Edition"),
-        cmd: String::from("fox&"),
+        status: String::from("Running"),
+        user: String::from("thiago"),
         cpu: 54.3,
-        memory: 835584,
+        memory: 28.4,
+        cmd: String::from("fox&"),
     });
+    for _i in 0..12 {
+        process_list.push(ProcessInfo {
+            pid: 2222,
+            name: String::from("Google Chrome"),
+            status: String::from("Running"),
+            user: String::from("thiago"),
+            cpu: 16.8,
+            memory: 58.4,
+            cmd: String::from("chrome --dark-mode --profile-folder=/home/thiago/.chrome"),
+        });
+    }
     (*data).process_list = process_list;
+
+    (*data).extra_infos = vec![
+        String::from("Linux 64 bits"),
+        String::from("Intel Core i3"),
+        String::from("Nvidia 940M"),
+    ];
 
     (*data).tick += 1;
 }
@@ -101,9 +122,11 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
 struct ProcessInfo {
     pid: usize,
     name: String,
-    cmd: String,
+    status: String,
+    user: String,
     cpu: f64,
-    memory: u64,
+    memory: f64,
+    cmd: String,
 }
 
 #[derive(Default, Clone)]
@@ -112,6 +135,7 @@ struct CollectedData {
     ram_usage: Option<f64>,
     disk_usage: Vec<f64>,
     process_list: Vec<ProcessInfo>,
+    extra_infos: Vec<String>,
     tick: u64,
 }
 
@@ -410,6 +434,8 @@ enum PaneType {
     Cpu,
     Memory,
     Disks,
+    Info,
+    Tasks,
 }
 
 struct Pane {
@@ -492,13 +518,81 @@ impl PaneType {
 
                 content.into()
             }
+            PaneType::Info => {
+                let mut content = column![
+                    text("Infos").size(24),
+                ]
+                .width(Length::Fill)
+                .spacing(10)
+                .align_items(Alignment::Center);
+
+                for line in &data.current_data_copy.extra_infos {
+                    content = content.push(text(line).size(16));
+                }
+                
+                content.into()
+            }
+            PaneType::Tasks => {
+                // let mut content = column![
+                //     text("Tasks").size(24),
+                // ]
+                // .width(Length::Fill)
+                // .spacing(10)
+                // .align_items(Alignment::Center);
+                let mut pid = column![].width(Length::Units(50)).spacing(2).align_items(Alignment::Start);
+                let mut name = column![].width(Length::Units(200)).spacing(2).align_items(Alignment::Start);
+                let mut status = column![].width(Length::Units(70)).spacing(2).align_items(Alignment::Start);
+                let mut user = column![].width(Length::Units(70)).spacing(2).align_items(Alignment::Start);
+                let mut cpu = column![].width(Length::Units(40)).spacing(2).align_items(Alignment::End);
+                let mut memory = column![].width(Length::Units(45)).spacing(2).align_items(Alignment::End);
+                let mut cmd = column![].width(Length::Fill).spacing(2).align_items(Alignment::Start);
+
+                pid = pid.push(text("PID").size(16));
+                name = name.push(text("Name").size(16));
+                status = status.push(text("Status").size(16));
+                user = user.push(text("User").size(16));
+                cpu = cpu.push(text("CPU%").size(16));
+                memory = memory.push(text("MEM%").size(16));
+                cmd = cmd.push(text("Command").size(16));
+
+                for task in &data.current_data_copy.process_list {
+                    pid = pid.push(text(format!("{}", task.pid)).size(16));
+                    name = name.push(text(format!("{}", task.name)).size(16));
+                    status = status.push(text(format!("{}", task.status)).size(16));
+                    user = user.push(text(format!("{}", task.user)).size(16));
+                    cpu = cpu.push(text(format!("{}", task.cpu)).size(16));
+                    memory = memory.push(text(format!("{}", task.memory)).size(16));
+                    cmd = cmd.push(text(format!("{}", task.cmd)).size(16).height(Length::Units(16)));
+
+                    let t: iced_native::widget::Text<iced::Renderer> = text(format!("{}", task.cmd)).size(16).height(Length::Units(16));
+                    // cmd = cmd.push(t);
+                    println!("{:?}", <dyn iced_native::widget::Widget<Message, iced::Renderer>>::width(&t));
+                }
+
+                let content = row![
+                    pid,
+                    name,
+                    status,
+                    user,
+                    cpu,
+                    memory,
+                    cmd,
+                ]
+                .width(Length::Fill)
+                .spacing(5)
+                .align_items(Alignment::Start);
+                
+                content.into()
+            }
         }
     }
-    const ALL: [PaneType; 4] = [
+    const ALL: [PaneType; 6] = [
         PaneType::Selection,
         PaneType::Cpu,
         PaneType::Memory,
         PaneType::Disks,
+        PaneType::Info,
+        PaneType::Tasks,
     ];
 }
 
@@ -516,6 +610,12 @@ impl Display for PaneType {
             }
             PaneType::Disks => {
                 write!(f, "Disks")
+            }
+            PaneType::Info => {
+                write!(f, "System information")
+            }
+            PaneType::Tasks => {
+                write!(f, "Tasks")
             }
         }
     }
@@ -540,51 +640,59 @@ fn view_content<'a>(
     pane_type: PaneType,
     local_data: &'a LocalData,
 ) -> Element<'a, Message> {
-    let button = |label, message| {
-        button(
-            text(label)
-                .width(Length::Fill)
-                .horizontal_alignment(alignment::Horizontal::Center)
-                .size(16),
-        )
-        .width(Length::Fill)
-        .padding(8)
-        .on_press(message)
-    };
+    // let button = |label, message| {
+    //     button(
+    //         text(label)
+    //             .width(Length::Fill)
+    //             .horizontal_alignment(alignment::Horizontal::Center)
+    //             .size(16),
+    //     )
+    //     .width(Length::Fill)
+    //     .padding(8)
+    //     .on_press(message)
+    // };
 
-    let mut controls = column![
-        button(
-            "Split horizontally",
-            Message::Split(pane_grid::Axis::Horizontal, pane),
-        ),
-        button(
-            "Split vertically",
-            Message::Split(pane_grid::Axis::Vertical, pane),
-        ),
-    ]
-    .spacing(5)
-    .max_width(150);
+    // let mut controls = column![
+    //     button(
+    //         "Split horizontally",
+    //         Message::Split(pane_grid::Axis::Horizontal, pane),
+    //     ),
+    //     button(
+    //         "Split vertically",
+    //         Message::Split(pane_grid::Axis::Vertical, pane),
+    //     ),
+    // ]
+    // .spacing(5)
+    // .max_width(150);
 
-    if total_panes > 1 && !is_pinned {
-        controls = controls.push(
-            button("Close", Message::Close(pane))
-                .style(theme::Button::Destructive),
-        )
-    }
+    // if total_panes > 1 && !is_pinned {
+    //     controls = controls.push(
+    //         button("Close", Message::Close(pane))
+    //             .style(theme::Button::Destructive),
+    //     )
+    // }
 
-    let content = column![
-        pane_type.content(local_data),
-        text(format!("{}x{}", size.width, size.height)).size(24),
-        controls,
-    ]
-    .width(Length::Fill)
-    .spacing(10)
-    .align_items(Alignment::Center);
+    // let content = column![
+    //     pane_type.content(local_data),
+    //     text(format!("{}x{}", size.width, size.height)).size(24),
+    //     controls,
+    // ]
+    // .width(Length::Fill)
+    // .spacing(10)
+    // .align_items(Alignment::Center);
 
-    container(scrollable(content))
+    // container(scrollable(content))
+    //     .width(Length::Fill)
+    //     .height(Length::Fill)
+    //     .padding(5)
+    //     .center_y()
+    //     .into()
+    
+    container(scrollable(pane_type.content(local_data)))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(5)
+        .center_x()
         .center_y()
         .into()
 }
@@ -660,7 +768,7 @@ impl CpuUsageChart {
     fn set_data(&mut self, value: impl Iterator<Item = f64>) {
         self.data_points = value.collect();
 
-        while self.data_points.len() >= self.max_points {
+        while self.data_points.len() > self.max_points {
             self.data_points.pop_back();
         }
 
@@ -707,7 +815,7 @@ impl Chart<Message> for CpuUsageChart {
         use plotters::{prelude::*, style::Color};
 
         const PLOT_LINE_COLOR: RGBColor = RGBColor(0, 175, 255);
-        let start = self.max_points - self.data_points.len();
+        let end = self.max_points;
 
         let mut chart = chart
             .x_label_area_size(0)
@@ -735,7 +843,7 @@ impl Chart<Message> for CpuUsageChart {
         chart
             .draw_series(
                 AreaSeries::new(
-                    self.data_points.iter().enumerate().map(|(x, y)| (x + 1 + start, *y)),
+                    self.data_points.iter().enumerate().map(|(x, y)| (end - x, *y)),
                     0.0,
                     PLOT_LINE_COLOR.mix(0.175),
                 )
