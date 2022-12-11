@@ -5,10 +5,13 @@ use iced::keyboard;
 use iced::theme::{self, Theme};
 use iced::widget::canvas::{Cache, Frame, Geometry};
 use iced::widget::pane_grid::{self, PaneGrid};
+use iced::widget::canvas;
 use iced::widget::{button, column, container, row, scrollable, text, pick_list};
 use iced::{
     Application, Color, Command, Element, Length, Settings, Size, Subscription
 };
+use iced_native::Rectangle;
+use iced::widget::canvas::Cursor;
 use iced_lazy::responsive;
 use iced_native::{event, subscription, Event};
 use plotters::prelude::ChartBuilder;
@@ -76,7 +79,7 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
         }
     }
     (*data).ram_usage = Some(68.4);
-    (*data).disk_usage = vec![94.1, 22.2];
+    (*data).disk_usage = vec![(94.1, String::from("SSD"), String::from("256G")), (22.2, String::from("HDD"), String::from("2TB"))];
     
     let mut process_list = vec![];
     process_list.push(ProcessInfo {
@@ -134,7 +137,7 @@ struct ProcessInfo {
 struct CollectedData {
     cpu_usage: Vec<VecDeque<f64>>,
     ram_usage: Option<f64>,
-    disk_usage: Vec<f64>,
+    disk_usage: Vec<(f64, String, String)>,
     process_list: Vec<ProcessInfo>,
     extra_infos: Vec<String>,
     tick: u64,
@@ -189,8 +192,8 @@ impl LocalData {
             self.disk_charts.push(DiskUsageChart::new());
         }
         for (i, chart) in self.disk_charts.iter_mut().enumerate() {
-            let used = self.current_data_copy.disk_usage[i];
-            chart.set_data((used, 100.0 - used));
+            let used = &self.current_data_copy.disk_usage[i];
+            chart.set_data((used.0, 100.0 - used.0), used.1.clone(), used.2.clone());
         }
     }
 }
@@ -455,6 +458,70 @@ impl Pane {
     }
 }
 
+const USED_COLOR: Color = Color::from_rgb(
+    255 as f32 / 255.0,
+    222 as f32 / 255.0,
+    153 as f32 / 255.0
+);
+const FREE_COLOR: Color = Color::from_rgb(
+    153 as f32 / 255.0,
+    222 as f32 / 255.0,
+    255 as f32 / 255.0
+);
+
+#[derive(Debug)]
+struct DiskUsageLabel {
+    color: Color,
+}
+use iced::widget::canvas::Path;
+use iced_native::Point;
+use iced::widget::canvas::Stroke;
+
+impl canvas::Program<Message> for DiskUsageLabel {
+    type State = ();
+
+    fn draw(&self, _state: &(), _theme: &Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry>{
+        // // We prepare a new `Frame`
+        // let mut frame = Frame::new(bounds.size());
+
+        // // let rec1 = canvas::Path::rectangle(frame., iced::Size::new(bounds.width, bounds.height));
+        // // let rec1 = canvas::Path::rectangle(iced::Point::new(bounds.x, bounds.y), iced::Size::new(bounds.width, bounds.height));
+        // // frame.fill(&rec1, self.color);
+        // frame.fill_rectangle(iced::Point::new(bounds.x, bounds.y), iced::Size::new(bounds.width, bounds.height), self.color);
+
+        // vec![frame.into_geometry()]
+
+        let mut frame = Frame::new(bounds.size());
+        // frame.stroke(
+        //     &Path::rectangle(
+        //         Point {
+        //             x: bounds.width / 10.,
+        //             y: bounds.height / 10.,
+        //         },
+        //         Size {
+        //             width: 4. * bounds.width / 5.,
+        //             height: 4. * bounds.height / 5.,
+        //         },
+        //     ),
+        //     Stroke::default(),
+        // );
+        frame.fill(&Path::rectangle(
+                Point {
+                    x: bounds.width / 10.,
+                    y: bounds.height / 10.,
+                },
+                Size {
+                    width: 4. * bounds.width / 5.,
+                    height: 4. * bounds.height / 5.,
+                },
+            ),
+            self.color,
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
+
 impl PaneType {
     fn content<'a>(&self, data: &'a LocalData, size: Size) -> Element<'a, Message> {
         match *self {
@@ -505,7 +572,7 @@ impl PaneType {
                     content = content.push(row);
                 }
 
-                // content.into().explain(Color::BLACK)
+                // content.into()
                 // content.into::<Element<Message, iced::Renderer>>()
                 std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
             }
@@ -524,26 +591,64 @@ impl PaneType {
                 content.into()
             }
             PaneType::Disks => {
+                // let c = canvas(DiskUsageLabel { color: USED_COLOR })
+                //     .width(Length::Units(50))
+                //     .height(Length::Units(50));
+                // return std::convert::Into::<Element<Message, iced::Renderer>>::into(c).explain(Color::BLACK);
+                
                 let mut content = column![
                     text("Disks").size(24),
+                    row(vec![
+                        canvas(DiskUsageLabel { color: USED_COLOR })
+                            .width(Length::Units(20))
+                            .height(Length::Units(20))
+                            .into(),
+                        text("Used").size(16).into(),
+                        canvas(DiskUsageLabel { color: FREE_COLOR })
+                            .width(Length::Units(20))
+                            .height(Length::Units(20))
+                            .into(),
+                        text("Free").size(16).into(),
+                    ]).align_items(Alignment::Center)
                 ]
                 .width(Length::Fill)
-                .spacing(10)
+                .spacing(0)
                 .align_items(Alignment::Center);
 
+                let padding = 10;
+
+                let min_width = 150.0 + (padding as f32);
+                let width = size.width - (padding as f32);
+                let items_per_row = std::cmp::min(
+                    std::cmp::max((width / min_width).trunc() as usize, 1usize),
+                    data.disk_charts.len()
+                );
+                let width_per_item = (width / (items_per_row as f32)) as u16 - padding;
+                let height_per_item = width_per_item;
+                // let max_width = 450;
+
                 let mut i = 0;
-                for disk_chart in &data.disk_charts {
-                    let row = row(vec![disk_chart.view(i)])
+                for disk_charts in data.disk_charts.chunks(items_per_row) {
+                    let mut row = row(vec![])
                         .spacing(5)
                         .padding(5)
                         .width(Length::Fill)
-                        .height(Length::Units(300))
+                        .height(Length::Units(height_per_item - 10))
                         .align_items(Alignment::Center);
+
+                    for disk_chart in disk_charts {
+                        row = row.push(container(disk_chart.view(i))
+                            .padding(0)
+                            .width(Length::Units(width_per_item))
+                            .height(Length::Units(height_per_item - 10))
+                        );
+                        i += 1;
+                    }
                     content = content.push(row);
-                    i += 1;
                 }
 
-                content.into()
+                // content.into()
+                std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
             }
             PaneType::Info => {
                 let mut content = column![
@@ -882,6 +987,8 @@ impl Chart<Message> for CpuUsageChart {
 struct DiskUsageChart {
     cache: Cache,
     data_points: (f64, f64),
+    tech: String,
+    capacity: String,
 }
 
 impl DiskUsageChart {
@@ -889,27 +996,49 @@ impl DiskUsageChart {
         Self {
             cache: Cache::new(),
             data_points: (0.0, 100.0),
+            tech: String::from(""),
+            capacity: String::from(""),
         }
     }
 
-    fn set_data(&mut self, value: (f64, f64)) {
+    fn set_data(&mut self, value: (f64, f64), tech: String, cap: String) {
         self.data_points = value;
+        self.tech = tech;
+        self.capacity = cap;
         self.cache.clear();
     }
 
     fn view(&self, idx: usize) -> Element<Message> {
+        // container(
+        //     column(Vec::new())
+        //         .width(Length::Fill)
+        //         .height(Length::Fill)
+        //         .spacing(5)
+        //         .push(text(format!("Disk {}", idx)))
+        //         .push(
+        //             ChartWidget::new(self).height(Length::Fill),
+        //         ),
+        // )
+        // .width(Length::Fill)
+        // .height(Length::Fill)
+        // .align_x(alignment::Horizontal::Center)
+        // .align_y(alignment::Vertical::Center)
+        // .into()
+
         container(
             column(Vec::new())
                 .width(Length::Fill)
-                .height(Length::Fill)
-                .spacing(5)
-                .push(text(format!("Disk {}", idx)))
+                .height(Length::Shrink)
+                .spacing(0)
+                .padding(0)
+                .push(text(format!("Disk {} ({}, {})", idx, self.tech, self.capacity)))
                 .push(
                     ChartWidget::new(self).height(Length::Fill),
-                ),
+                )
+                .align_items(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Shrink)
         .align_x(alignment::Horizontal::Center)
         .align_y(alignment::Vertical::Center)
         .into()
@@ -933,37 +1062,40 @@ impl Chart<Message> for DiskUsageChart {
         self.cache.draw(bounds, draw_fn)
     }
 
-    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, mut chart: ChartBuilder<DB>) {
+    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, mut chart: ChartBuilder<DB>) {}
+
+    fn draw_chart<DB: DrawingBackend>(&self, state: &Self::State, root: plotters_iced::DrawingArea<DB, plotters::coord::Shift>) {
         use plotters::prelude::*;
         
         const USED_COLOR: RGBColor = RGBColor(255, 222, 153);
         const FREE_COLOR: RGBColor = RGBColor(153, 222, 255);
 
-        let mut chart = chart
-            .x_label_area_size(0)
-            .y_label_area_size(0)
-            .margin(5)
-            .build_cartesian_2d(0..300, 0..300)
-            .expect("failed to build chart");
+        // let mut chart = chart
+        //     .x_label_area_size(0)
+        //     .y_label_area_size(0)
+        //     .margin(5)
+        //     .build_cartesian_2d(0..300, 0..300)
+        //     .expect("failed to build chart");
             
-        chart
-            .configure_mesh()
-            .disable_x_mesh()
-            .disable_y_mesh()
-            .draw()
-            .expect("failed to draw chart mesh");
+        // chart
+        //     .configure_mesh()
+        //     .disable_x_mesh()
+        //     .disable_y_mesh()
+        //     .draw()
+        //     .expect("failed to draw chart mesh");
 
-        let area = chart.plotting_area();
+        // let area = chart.plotting_area();
+        let area = root;
         let dims = area.dim_in_pixel();
         let center = (dims.0 as i32 / 2, dims.1 as i32 / 2);
-        let radius = 100.0;
+        let radius = (dims.1 / 2) as f64;
         let sizes = vec![self.data_points.1, self.data_points.0];
         let colors = vec![FREE_COLOR, USED_COLOR];
-        let labels = vec!["Free", "Used"];
+        let labels = vec!["", ""];
 
         let mut pie = Pie::new(&center, &radius, &sizes, &colors, &labels);
         pie.start_angle(-90.0);
-        pie.label_style((("sans-serif", 16).into_font()).color(&(BLACK)));
+        // pie.label_style((("sans-serif", 16).into_font()).color(&(BLACK)));
         pie.percentages((("sans-serif", radius * 0.32).into_font()).color(&BLACK));
         area.draw(&pie)
             .expect("failed to draw pie graph");
