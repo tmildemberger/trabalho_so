@@ -23,7 +23,7 @@ use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_POINTS: usize = 60;
+const MAX_POINTS: usize = 30;
 
 pub fn main() -> iced::Result {
     // Example::run(Settings::default())
@@ -456,7 +456,7 @@ impl Pane {
 }
 
 impl PaneType {
-    fn content<'a>(&self, data: &'a LocalData) -> Element<'a, Message> {
+    fn content<'a>(&self, data: &'a LocalData, size: Size) -> Element<'a, Message> {
         match *self {
             PaneType::Selection => {
                 text("Select pane type").size(16).into()
@@ -466,22 +466,48 @@ impl PaneType {
                     text("CPU").size(24),
                 ]
                 .width(Length::Fill)
-                .spacing(10)
+                // .height(Length::Fill)
+                .spacing(0)
                 .align_items(Alignment::Center);
 
-                let mut i = 0;
-                for cpu_chart in &data.cpu_charts {
-                    let row = row(vec![cpu_chart.view(i)])
-                        .spacing(5)
-                        .padding(5)
+                let padding = 10;
+
+                let min_width = 150.0 + (padding as f32);
+                let width = size.width - (padding as f32);
+                let items_per_row = std::cmp::min(
+                    std::cmp::max((width / min_width).trunc() as usize, 1usize),
+                    data.cpu_charts.len()
+                );
+                let width_per_item = (width / (items_per_row as f32)) as u16 - padding;
+                let height_per_item = (width_per_item * 62) / 90;
+                // let max_width = 450;
+
+
+                let mut i: usize = 0;
+                let iter = data.cpu_charts.chunks(items_per_row);
+                for cpu_charts in iter {
+                    let mut row = row(vec![])
+                        .spacing(padding)
+                        .padding(padding)
                         .width(Length::Fill)
-                        .height(Length::Units(300))
+                        .height(Length::Units(height_per_item + 10))
                         .align_items(Alignment::Center);
+
+                    for cpu_chart in cpu_charts {
+                        row = row.push(container(cpu_chart.view(i))
+                            .padding(0)
+                            .width(Length::Units(width_per_item))
+                            .height(Length::Units(height_per_item + 10))
+                        );
+                        i += 1;
+                    }
+
                     content = content.push(row);
-                    i += 1;
                 }
 
-                content.into()
+                // content.into().explain(Color::BLACK)
+                // content.into::<Element<Message, iced::Renderer>>()
+                std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
             }
             PaneType::Memory => {
                 let mut content = column![
@@ -521,7 +547,7 @@ impl PaneType {
             }
             PaneType::Info => {
                 let mut content = column![
-                    text("Infos").size(24),
+                    text("System Info").size(24),
                 ]
                 .width(Length::Fill)
                 .spacing(10)
@@ -685,7 +711,7 @@ fn view_content<'a>(
     //     .center_y()
     //     .into()
     
-    container(scrollable(pane_type.content(local_data)))
+    container(scrollable(pane_type.content(local_data, size)))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(5)
@@ -776,15 +802,17 @@ impl CpuUsageChart {
         container(
             column(Vec::new())
                 .width(Length::Fill)
-                .height(Length::Fill)
-                .spacing(5)
-                .push(text(format!("CPU {}", idx)))
+                .height(Length::Shrink)
+                .spacing(0)
+                .padding(0)
+                .push(text(format!("Core {}", idx)))
                 .push(
                     ChartWidget::new(self).height(Length::Fill),
-                ),
+                )
+                .align_items(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Shrink)
         .align_x(alignment::Horizontal::Center)
         .align_y(alignment::Vertical::Center)
         .into()
@@ -816,8 +844,8 @@ impl Chart<Message> for CpuUsageChart {
 
         let mut chart = chart
             .x_label_area_size(0)
-            .y_label_area_size(28)
-            .margin(20)
+            .y_label_area_size(24)
+            .margin(5)
             .build_cartesian_2d(1..self.max_points, 0f64..100.0)
             .expect("failed to build chart");
 
@@ -828,7 +856,7 @@ impl Chart<Message> for CpuUsageChart {
             .axis_style(ShapeStyle::from(plotters::style::colors::BLUE.mix(0.45)).stroke_width(1))
             .y_labels(10)
             .y_label_style(
-                ("sans-serif", 15)
+                ("sans-serif", 12)
                     .into_font()
                     .color(&plotters::style::colors::BLUE.mix(0.65))
                     .transform(FontTransform::Rotate90),
