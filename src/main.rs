@@ -78,8 +78,8 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
             (*data).cpu_usage[i].pop_back();
         }
     }
-    (*data).ram_usage = Some(68.4);
     (*data).disk_usage = vec![(94.1, String::from("SSD"), String::from("256G")), (22.2, String::from("HDD"), String::from("2TB"))];
+    (*data).ram_usage = (68.4, 10.2, 22.4, 36.7, String::from("DDR3"), String::from("7.66G"), String::from("7.63G"));
     
     let mut process_list = vec![];
     process_list.push(ProcessInfo {
@@ -136,7 +136,7 @@ struct ProcessInfo {
 #[derive(Default, Clone)]
 struct CollectedData {
     cpu_usage: Vec<VecDeque<f64>>,
-    ram_usage: Option<f64>,
+    ram_usage: (f64, f64, f64, f64, String, String, String),
     disk_usage: Vec<(f64, String, String)>,
     process_list: Vec<ProcessInfo>,
     extra_infos: Vec<String>,
@@ -148,6 +148,7 @@ struct LocalData {
     current_data_copy: CollectedData,
     cpu_charts: Vec<CpuUsageChart>,
     disk_charts: Vec<DiskUsageChart>,
+    memory_chart: Option<MemoryUsageChart>,
 }
 
 struct Example {
@@ -173,6 +174,7 @@ enum Message {
     Restore,
     Close(pane_grid::Pane),
     CloseFocused,
+    UnFocus,
     Tick,
     ChangeType(pane_grid::Pane, PaneType),
 }
@@ -194,6 +196,16 @@ impl LocalData {
         for (i, chart) in self.disk_charts.iter_mut().enumerate() {
             let used = &self.current_data_copy.disk_usage[i];
             chart.set_data((used.0, 100.0 - used.0), used.1.clone(), used.2.clone());
+        }
+    }
+
+    fn update_memory(&mut self) {
+        if self.memory_chart.is_none() {
+            self.memory_chart = Some(MemoryUsageChart::new());
+        }
+        if let Some(memory_chart) = &mut self.memory_chart {
+            let mem_data = &self.current_data_copy.ram_usage;
+            memory_chart.set_data((mem_data.0, mem_data.1), (mem_data.2, mem_data.3), mem_data.4.clone(), mem_data.5.clone(), mem_data.6.clone());
         }
     }
 }
@@ -219,6 +231,7 @@ impl Application for Example {
                     current_data_copy: CollectedData::default(),
                     cpu_charts: Vec::new(),
                     disk_charts: Vec::new(),
+                    memory_chart: None,
                 },
             },
             Command::none(),
@@ -308,6 +321,9 @@ impl Application for Example {
                     }
                 }
             }
+            Message::UnFocus => {
+                self.focus = None;
+            }
             Message::Tick => {
                 let current_tick = self.shared_tick.load(Ordering::SeqCst);
                 if self.last_tick != current_tick {
@@ -316,6 +332,7 @@ impl Application for Example {
                     self.local_data.current_data_copy = (*data).clone();
                     self.local_data.update_cpus();
                     self.local_data.update_disks();
+                    self.local_data.update_memory();
                 }
             }
             Message::ChangeType(pane, new_pane_type) => {
@@ -340,7 +357,15 @@ impl Application for Example {
                     Event::Keyboard(keyboard::Event::KeyPressed {
                         key_code,
                         modifiers,
-                    }) if modifiers.command() => handle_hotkey(key_code),
+                    }) => {
+                        if modifiers.command() {
+                            handle_hotkey(key_code, true)
+                        } else if modifiers.shift() {
+                            handle_hotkey(key_code, false)
+                        } else {
+                            None
+                        }
+                    },
                     _ => None,
                 }
             }),
@@ -380,7 +405,7 @@ impl Application for Example {
                     style::title_bar_active
                 });
             
-            pane_grid::Content::new(responsive(move |size| {
+            let grid = pane_grid::Content::new(responsive(move |size| {
                 view_content(
                     id,
                     total_panes,
@@ -389,13 +414,23 @@ impl Application for Example {
                     pane.pane_type,
                     &self.local_data,
                 )
-            }))
-            .title_bar(title_bar)
-            .style(if is_focused {
-                style::pane_focused
+            }));
+
+            if (is_focused) {
+                grid
+                .title_bar(title_bar)
+                .style(if is_focused {
+                    style::pane_focused
+                } else {
+                    style::pane_active
+                })
             } else {
-                style::pane_active
-            })
+                grid.style(if is_focused {
+                    style::pane_focused
+                } else {
+                    style::pane_active
+                })
+            }
         })
         .width(Length::Fill)
         .height(Length::Fill)
@@ -412,23 +447,34 @@ impl Application for Example {
     }
 }
 
-fn handle_hotkey(key_code: keyboard::KeyCode) -> Option<Message> {
+fn handle_hotkey(key_code: keyboard::KeyCode, control: bool) -> Option<Message> {
     use keyboard::KeyCode;
     use pane_grid::{Axis, Direction};
 
-    let direction = match key_code {
-        KeyCode::Up => Some(Direction::Up),
-        KeyCode::Down => Some(Direction::Down),
-        KeyCode::Left => Some(Direction::Left),
-        KeyCode::Right => Some(Direction::Right),
-        _ => None,
-    };
-
-    match key_code {
-        KeyCode::V => Some(Message::SplitFocused(Axis::Vertical)),
-        KeyCode::H => Some(Message::SplitFocused(Axis::Horizontal)),
-        KeyCode::W => Some(Message::CloseFocused),
-        _ => direction.map(Message::FocusAdjacent),
+    if (control) {
+        let direction = match key_code {
+            KeyCode::Up => Some(Direction::Up),
+            KeyCode::Down => Some(Direction::Down),
+            KeyCode::Left => Some(Direction::Left),
+            KeyCode::Right => Some(Direction::Right),
+            _ => None,
+        };
+    
+        match key_code {
+            KeyCode::V => Some(Message::SplitFocused(Axis::Vertical)),
+            KeyCode::H => Some(Message::SplitFocused(Axis::Horizontal)),
+            KeyCode::W => Some(Message::CloseFocused),
+            KeyCode::U => Some(Message::UnFocus),
+            _ => direction.map(Message::FocusAdjacent),
+        }
+    } else {
+        match key_code {
+            KeyCode::V => Some(Message::SplitFocused(Axis::Vertical)),
+            KeyCode::H => Some(Message::SplitFocused(Axis::Horizontal)),
+            KeyCode::W => Some(Message::CloseFocused),
+            KeyCode::U => Some(Message::UnFocus),
+            _ => None,
+        }
     }
 }
 
@@ -469,15 +515,31 @@ const FREE_COLOR: Color = Color::from_rgb(
     255 as f32 / 255.0
 );
 
+const MEM_USED_COLOR: Color = Color::from_rgb(
+    175 as f32 / 255.0,
+    175 as f32 / 255.0,
+    175 as f32 / 255.0
+);
+const MEM_BUFF_COLOR: Color = Color::from_rgb(
+    175 as f32 / 255.0,
+    175 as f32 / 255.0,
+    255 as f32 / 255.0
+);
+const MEM_FREE_COLOR: Color = Color::from_rgb(
+    0 as f32 / 255.0,
+    175 as f32 / 255.0,
+    255 as f32 / 255.0
+);
+
 #[derive(Debug)]
-struct DiskUsageLabel {
+struct ColoredRect {
     color: Color,
 }
 use iced::widget::canvas::Path;
 use iced_native::Point;
 use iced::widget::canvas::Stroke;
 
-impl canvas::Program<Message> for DiskUsageLabel {
+impl canvas::Program<Message> for ColoredRect {
     type State = ();
 
     fn draw(&self, _state: &(), _theme: &Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry>{
@@ -579,19 +641,40 @@ impl PaneType {
             PaneType::Memory => {
                 let mut content = column![
                     text("Memory").size(24),
+                    row(vec![
+                        canvas(ColoredRect { color: MEM_USED_COLOR })
+                            .width(Length::Units(20))
+                            .height(Length::Units(20))
+                            .into(),
+                        text("Used").size(16).into(),
+                        canvas(ColoredRect { color: MEM_BUFF_COLOR })
+                            .width(Length::Units(20))
+                            .height(Length::Units(20))
+                            .into(),
+                        text("Buffered").size(16).into(),
+                        canvas(ColoredRect { color: MEM_FREE_COLOR })
+                            .width(Length::Units(20))
+                            .height(Length::Units(20))
+                            .into(),
+                        text("Free").size(16).into(),
+                    ]).align_items(Alignment::Center)
                 ]
                 .width(Length::Fill)
                 .spacing(10)
                 .align_items(Alignment::Center);
 
-                if let Some(memory) = data.current_data_copy.ram_usage {
-                    content = content.push(text(format!("RAM: {}%", memory)).size(16));
+                if let Some(memory_chart) = &data.memory_chart {
+                    content = content.push(container(memory_chart.view())
+                    .padding(0)
+                    .width(Length::Fill)
+                    .height(Length::Units(150))
+                    );
                 }
                 
                 content.into()
             }
             PaneType::Disks => {
-                // let c = canvas(DiskUsageLabel { color: USED_COLOR })
+                // let c = canvas(ColoredRect { color: USED_COLOR })
                 //     .width(Length::Units(50))
                 //     .height(Length::Units(50));
                 // return std::convert::Into::<Element<Message, iced::Renderer>>::into(c).explain(Color::BLACK);
@@ -599,12 +682,12 @@ impl PaneType {
                 let mut content = column![
                     text("Disks").size(24),
                     row(vec![
-                        canvas(DiskUsageLabel { color: USED_COLOR })
+                        canvas(ColoredRect { color: USED_COLOR })
                             .width(Length::Units(20))
                             .height(Length::Units(20))
                             .into(),
                         text("Used").size(16).into(),
-                        canvas(DiskUsageLabel { color: FREE_COLOR })
+                        canvas(ColoredRect { color: FREE_COLOR })
                             .width(Length::Units(20))
                             .height(Length::Units(20))
                             .into(),
@@ -1100,6 +1183,129 @@ impl Chart<Message> for DiskUsageChart {
         area.draw(&pie)
             .expect("failed to draw pie graph");
 
+    }
+}
+
+struct MemoryUsageChart {
+    cache: Cache,
+    memory_points: (f64, f64),
+    swap_points: (f64, f64),
+    tech: String,
+    capacity: String,
+    swap_capacity: String,
+}
+
+impl MemoryUsageChart {
+    fn new() -> Self {
+        Self {
+            cache: Cache::new(),
+            memory_points: (0.0, 100.0),
+            swap_points: (0.0, 100.0),
+            tech: String::from(""),
+            capacity: String::from(""),
+            swap_capacity: String::from(""),
+        }
+    }
+
+    fn set_data(&mut self, memory_value: (f64, f64), swap_value: (f64, f64), tech: String, cap: String, swap_cap: String) {
+        self.memory_points = memory_value;
+        self.swap_points = swap_value;
+        self.tech = tech;
+        self.capacity = cap;
+        self.swap_capacity = swap_cap;
+        self.cache.clear();
+    }
+
+    fn view(&self) -> Element<Message> {
+        container(
+            column(Vec::new())
+                .width(Length::Fill)
+                .height(Length::Shrink)
+                .spacing(0)
+                .padding(0)
+                .push(text(format!("Memory ({}, {}) - Swap ({})", self.tech, self.capacity, self.swap_capacity)))
+                .push(
+                    ChartWidget::new(self).height(Length::Fill),
+                )
+                // .push(text(format!("Swap ({})", self.swap_capacity)))
+                // .push(
+                //     ChartWidget::new(self).height(Length::Fill),
+                // )
+                .align_items(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Shrink)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center)
+        .into()
+    }
+}
+
+impl Chart<Message> for MemoryUsageChart {
+    type State = ();
+    // fn update(
+    //     &mut self,
+    //     event: Event,
+    //     bounds: Rectangle,
+    //     cursor: Cursor,
+    // ) -> (event::Status, Option<Message>) {
+    //     self.cache.clear();
+    //     (event::Status::Ignored, None)
+    // }
+
+    #[inline]
+    fn draw<F: Fn(&mut Frame)>(&self, bounds: Size, draw_fn: F) -> Geometry {
+        self.cache.draw(bounds, draw_fn)
+    }
+
+    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, mut chart: ChartBuilder<DB>) {
+        use plotters::{prelude::*, style::Color};
+
+        const USED_COLOR: RGBColor = RGBColor(175, 175, 175);
+        const BUFF_COLOR: RGBColor = RGBColor(175, 175, 255);
+        const FREE_COLOR: RGBColor = RGBColor(0, 175, 255);
+
+        let mut chart = chart
+            .x_label_area_size(0)
+            .y_label_area_size(36)
+            .margin(5)
+            .build_cartesian_2d(0f64..100.0, (1i32..2).into_segmented())
+            .expect("failed to build chart");
+
+        chart
+            .configure_mesh()
+            // .bold_line_style(plotters::style::colors::BLUE.mix(0.1))
+            // .light_line_style(plotters::style::colors::BLUE.mix(0.05))
+            // .axis_style(ShapeStyle::from(plotters::style::colors::BLUE.mix(0.45)).stroke_width(1))
+            .y_labels(10)
+            .y_label_style(
+                ("sans-serif", 14)
+                    .into_font()
+                    .color(&plotters::style::colors::BLACK.mix(0.65))
+                    .transform(FontTransform::Rotate90),
+            )
+            .y_label_formatter(&|y| if let SegmentValue::CenterOf(yy) = y { if *yy == 1 { format!("SWAP") } else { format!("RAM") } } else { format!("Error") })
+            .draw()
+            .expect("failed to draw chart mesh");
+        
+        let data = [
+            (0.0, self.swap_points.0, 1, USED_COLOR),
+            (self.swap_points.0, self.swap_points.0 + self.swap_points.1, 1, BUFF_COLOR),
+            (self.swap_points.0 + self.swap_points.1, 100.0, 1, FREE_COLOR),
+            (0.0, self.memory_points.0, 2, USED_COLOR),
+            (self.memory_points.0, self.memory_points.0 + self.memory_points.1, 2, BUFF_COLOR),
+            (self.memory_points.0 + self.memory_points.1, 100.0, 2, FREE_COLOR),
+        ];
+
+        chart
+            .draw_series(data.into_iter().map(|(start, usage, which, color)| {
+                let y0 = SegmentValue::Exact(which);
+                let y1 = SegmentValue::Exact(which + 1);
+                let mut bar = Rectangle::new([(start, y0), (usage, y1)], color.filled());
+                bar.set_margin(5, 5, 0, 0);
+                bar
+            }))
+            .expect("failed to draw chart data");
     }
 }
 
