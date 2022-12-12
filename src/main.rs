@@ -21,7 +21,6 @@ use plotters_iced::{Chart, ChartWidget};
 
 use std::collections::VecDeque;
 use std::fmt::Display;
-use std::io::BufReader;
 use std::time::Duration;
 use std::thread;
 use std::sync::{Arc, Mutex};
@@ -32,18 +31,46 @@ const MAX_POINTS: usize = 30;
 pub fn main() -> iced::Result {
     // Example::run(Settings::default())
     let shared_tick = Arc::new(AtomicU64::new(0));
-    let thread_tick = Arc::clone(&shared_tick);
-
     let shared_data = Arc::new(Mutex::new(CollectedData::default()));
-    let thread_data = Arc::clone(&shared_data);
+    
+    {
+        let thread_tick = Arc::clone(&shared_tick);
+        let thread_data = Arc::clone(&shared_data);
+    
+        thread::spawn(move || {
+            loop {
+                collect_data(&thread_data);
+                thread_tick.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
 
-    thread::spawn(move || {
-        loop {
-            collect_data(&thread_data);
-            thread_tick.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
+    {
+        let thread_tick = Arc::clone(&shared_tick);
+        let thread_data = Arc::clone(&shared_data);
+    
+        thread::spawn(move || {
+            loop {
+                collect_tasks(&thread_data);
+                thread_tick.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
+
+    {
+        let thread_tick = Arc::clone(&shared_tick);
+        let thread_data = Arc::clone(&shared_data);
+    
+        thread::spawn(move || {
+            loop {
+                collect_memory(&thread_data);
+                thread_tick.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
 
     Example::run(Settings {
         window: iced::window::Settings {
@@ -57,16 +84,145 @@ pub fn main() -> iced::Result {
     })
 }
 
-fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
-    let mut data = shared_data.lock().unwrap();
+fn collect_tasks(shared_data: &Arc<Mutex<CollectedData>>) {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    let process = Command::new("/usr/bin/ps")
+                        .stdout(Stdio::piped())
+                        .args(["-ew", "-o", "pid,ni,s,user,%cpu,%mem,args"])
+                        .spawn()
+                        .expect("failed to execute process");
 
-    if (*data).cpu_usage.len() == 0 {
-        for _i in 0..4 {
-            (*data).cpu_usage.push(VecDeque::new());
+    let mut s = String::new();
+    process.stdout.unwrap().read_to_string(&mut s).unwrap();
+    let mut lines = s.lines();
+    lines.next();
+
+    let mut process_list = vec![];
+
+    let mut last_whitespace = false;
+
+    for line in lines {
+        let fields: Vec<_> = line.trim().splitn(7, |c: char| {
+            if c.is_whitespace() {
+                if last_whitespace {
+                    return false
+                }
+                last_whitespace = true;
+                true
+            } else {
+                last_whitespace = false;
+                false
+            }
+        }).map(str::trim).collect();
+        last_whitespace = false;
+        if fields.len() == 7 {
+            // println!("{:?}", fields);
+            process_list.push(ProcessInfo {
+                pid: fields[0].parse().unwrap(),
+                nice: fields[1].to_owned(),
+                status: fields[2].to_owned(),
+                user: fields[3].to_owned(),
+                cpu: fields[4].parse().unwrap(),
+                memory: fields[5].parse().unwrap(),
+                cmd: fields[6].to_owned(),
+            });
         }
     }
 
-    let new_cpu_points = match (*data).tick % 4 {
+    let mut data = shared_data.lock().unwrap();
+    data.process_list = process_list;
+    data.updated_tasks = true;
+    data.tick += 1;
+}
+
+fn collect_memory(shared_data: &Arc<Mutex<CollectedData>>) {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    let process0 = Command::new("/usr/bin/sudo")
+                        .stdout(Stdio::piped())
+                        .args(["/usr/bin/dmidecode", "-t", "memory"])
+                        .spawn()
+                        .expect("failed to execute process0");
+
+    let mut s0 = String::new();
+    process0.stdout.unwrap().read_to_string(&mut s0).unwrap();
+    let mut lines = s0.lines();
+    let tech = lines.map(str::trim).find_map(|s| {
+        if s.starts_with("Type: ") {
+            let (a, b) = s.split_at(6);
+            Some(b.to_string())
+        } else {
+            None
+        }
+    }).unwrap_or(String::from("DDR3"));
+
+    let process1 = Command::new("/usr/bin/free")
+                        .stdout(Stdio::piped())
+                        .args(["-b", "-t"])
+                        .spawn()
+                        .expect("failed to execute process1");
+
+    let mut s1 = String::new();
+    process1.stdout.unwrap().read_to_string(&mut s1).unwrap();
+    let mut lines = s1.lines();
+    lines.next();
+    let mem_line = lines.next().unwrap();
+    let swap_line = lines.next().unwrap();
+
+    let mut last_whitespace = false;
+
+    let fields: Vec<_> = line.trim().splitn(7, |c: char| {
+        if c.is_whitespace() {
+            if last_whitespace {
+                return false
+            }
+            last_whitespace = true;
+            true
+        } else {
+            last_whitespace = false;
+            false
+        }
+    }).map(str::trim).collect();
+    last_whitespace = false;
+    let mem_data = if fields.len() == 7 {
+        let total: u64 = fields[1].parse().unwrap();
+        let used: u64 = fields[2].parse().unwrap();
+        let free: u64 = fields[3].parse().unwrap();
+        let buff: u64 = fields[5].parse().unwrap();
+        (total, used, free, buff)
+    } else {
+        panic!("wrong");
+    };
+    let swap_data = if fields.len() == 4 {
+        let total: u64 = fields[1].parse().unwrap();
+        let used: u64 = fields[2].parse().unwrap();
+        let free: u64 = fields[3].parse().unwrap();
+        let buff: u64 = 0;
+        (total, used, free, buff)
+    } else {
+        panic!("panic");
+    };
+    }
+    
+    // data.ram_usage = (68.4, 10.2, 22.4, 36.7, String::from("DDR3"), String::from("7.66G"), String::from("7.63G"));
+
+    let mut data = shared_data.lock().unwrap();
+    data.process_list = process_list;
+    data.updated_tasks = true;
+    data.tick += 1;
+}
+
+fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
+    let mut data = shared_data.lock().unwrap();
+
+    if data.cpu_usage.is_empty() {
+        for _i in 0..4 {
+            data.cpu_usage.push(VecDeque::new());
+        }
+    }
+
+    let new_cpu_points = match data.tick % 4 {
         0 => vec![22.0, 33.3, 75.9, 0.0],
         1 => vec![33.3, 75.9, 0.0, 22.0],
         2 => vec![75.9, 0.0, 22.0, 33.3],
@@ -74,59 +230,26 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
         _ => vec![22.0, 33.3, 75.9, 0.0],
     };
     for i in 0..4 {
-        (*data).cpu_usage[i].push_front(new_cpu_points[i]);
-        if (*data).cpu_usage[i].len() > MAX_POINTS {
-            (*data).cpu_usage[i].pop_back();
+        data.cpu_usage[i].push_front(new_cpu_points[i]);
+        if data.cpu_usage[i].len() > MAX_POINTS {
+            data.cpu_usage[i].pop_back();
         }
     }
-    (*data).disk_usage = vec![(94.1, String::from("SSD"), String::from("256G")), (22.2, String::from("HDD"), String::from("2TB"))];
-    (*data).ram_usage = (68.4, 10.2, 22.4, 36.7, String::from("DDR3"), String::from("7.66G"), String::from("7.63G"));
+    data.disk_usage = vec![(94.1, String::from("SSD"), String::from("256G")), (22.2, String::from("HDD"), String::from("2TB"))];
     
-    let mut process_list = vec![];
-    process_list.push(ProcessInfo {
-        pid: 1,
-        name: String::from("init"),
-        status: String::from("Idle"),
-        user: String::from("root"),
-        cpu: 1.2,
-        memory: 0.1,
-        cmd: String::from(""),
-    });
-    process_list.push(ProcessInfo {
-        pid: 1501,
-        name: String::from("Firefox Developer Edition"),
-        status: String::from("Running"),
-        user: String::from("thiago"),
-        cpu: 54.3,
-        memory: 28.4,
-        cmd: String::from("fox&"),
-    });
-    for _i in 0..12 {
-        process_list.push(ProcessInfo {
-            pid: 2222,
-            name: String::from("Google Chrome"),
-            status: String::from("Running"),
-            user: String::from("thiago"),
-            cpu: 16.8,
-            memory: 58.4,
-            cmd: String::from("chrome --dark-mode --profile-folder=/home/thiago/.chrome"),
-        });
-    }
-    (*data).process_list = process_list;
-
-    (*data).extra_infos = vec![
+    data.extra_infos = vec![
         String::from("Linux 64 bits"),
         String::from("Intel Core i3"),
         String::from("Nvidia 940M"),
     ];
 
-    (*data).tick += 1;
+    data.tick += 1;
 }
 
 #[derive(Default, Clone)]
 pub struct ProcessInfo {
     pid: usize,
-    name: String,
+    nice: String,
     status: String,
     user: String,
     cpu: f64,
@@ -141,6 +264,7 @@ struct CollectedData {
     disk_usage: Vec<(f64, String, String)>,
     process_list: Vec<ProcessInfo>,
     extra_infos: Vec<String>,
+    updated_tasks: bool,
     tick: u64,
 }
 
@@ -166,7 +290,6 @@ struct Example {
 
 #[derive(Debug, Clone, Copy)]
 enum Message {
-    Split(pane_grid::Axis, pane_grid::Pane),
     SplitFocused(pane_grid::Axis),
     FocusAdjacent(pane_grid::Direction),
     Clicked(pane_grid::Pane),
@@ -261,19 +384,6 @@ impl Application for Example {
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
         match message {
-            Message::Split(axis, pane) => {
-                let result = self.panes.split(
-                    axis,
-                    &pane,
-                    Pane::new(self.panes_created),
-                );
-
-                if let Some((pane, _)) = result {
-                    self.focus = Some(pane);
-                }
-
-                self.panes_created += 1;
-            }
             Message::SplitFocused(axis) => {
                 if let Some(pane) = self.focus {
                     let result = self.panes.split(
@@ -345,12 +455,18 @@ impl Application for Example {
                 let current_tick = self.shared_tick.load(Ordering::SeqCst);
                 if self.last_tick != current_tick {
                     self.last_tick = current_tick;
-                    let data = self.shared_data.lock().unwrap();
-                    self.local_data.current_data_copy = (*data).clone();
+                    {
+                        let mut data = self.shared_data.lock().unwrap();
+                        self.local_data.current_data_copy = data.clone();
+                        data.updated_tasks = false;
+                    }
                     self.local_data.update_cpus();
                     self.local_data.update_disks();
                     self.local_data.update_memory();
-                    self.local_data.update_tasks();
+                    if self.local_data.current_data_copy.updated_tasks {
+                        self.local_data.current_data_copy.updated_tasks = false;
+                        self.local_data.update_tasks();
+                    }
                 }
             }
             Message::ChangeType(pane, new_pane_type) => {
@@ -450,7 +566,7 @@ impl Application for Example {
                 )
             }));
 
-            if (is_focused) {
+            if is_focused {
                 grid
                 .title_bar(title_bar)
                 .style(if is_focused {
@@ -485,7 +601,7 @@ fn handle_hotkey(key_code: keyboard::KeyCode, control: bool) -> Option<Message> 
     use keyboard::KeyCode;
     use pane_grid::{Axis, Direction};
 
-    if (control) {
+    if control {
         let direction = match key_code {
             KeyCode::Up => Some(Direction::Up),
             KeyCode::Down => Some(Direction::Down),
@@ -539,30 +655,30 @@ impl Pane {
 }
 
 const USED_COLOR: Color = Color::from_rgb(
-    255 as f32 / 255.0,
-    222 as f32 / 255.0,
-    153 as f32 / 255.0
+    1.0,
+    222_f32 / 255.0,
+    153_f32 / 255.0
 );
 const FREE_COLOR: Color = Color::from_rgb(
-    153 as f32 / 255.0,
-    222 as f32 / 255.0,
-    255 as f32 / 255.0
+    153_f32 / 255.0,
+    222_f32 / 255.0,
+    1.0
 );
 
 const MEM_USED_COLOR: Color = Color::from_rgb(
-    175 as f32 / 255.0,
-    175 as f32 / 255.0,
-    175 as f32 / 255.0
+    175_f32 / 255.0,
+    175_f32 / 255.0,
+    175_f32 / 255.0
 );
 const MEM_BUFF_COLOR: Color = Color::from_rgb(
-    175 as f32 / 255.0,
-    175 as f32 / 255.0,
-    255 as f32 / 255.0
+    175_f32 / 255.0,
+    175_f32 / 255.0,
+    1.0
 );
 const MEM_FREE_COLOR: Color = Color::from_rgb(
-    0 as f32 / 255.0,
-    175 as f32 / 255.0,
-    255 as f32 / 255.0
+    0_f32 / 255.0,
+    175_f32 / 255.0,
+    1.0
 );
 
 #[derive(Debug)]
@@ -793,7 +909,7 @@ impl PaneType {
                 if let Some(tasks_chart) = &data.tasks_chart {
                     content = content.push(canvas(tasks_chart)
                         .width(Length::Fill)
-                        .height(Length::Units(550))
+                        .height(Length::Fill)
                     );
                 }
                 // let mut pid = column![].width(Length::Units(50)).spacing(2).align_items(Alignment::Start);
@@ -885,14 +1001,14 @@ const PANE_ID_COLOR_FOCUSED: Color = Color::from_rgb(
     0x47 as f32 / 255.0
 );
 
-fn view_content<'a>(
-    pane: pane_grid::Pane,
-    total_panes: usize,
-    is_pinned: bool,
+fn view_content<>(
+    _pane: pane_grid::Pane,
+    _total_panes: usize,
+    _is_pinned: bool,
     size: Size,
     pane_type: PaneType,
-    local_data: &'a LocalData,
-) -> Element<'a, Message> {
+    local_data: &'_ LocalData,
+) -> Element<'_, Message> {
     // let button = |label, message| {
     //     button(
     //         text(label)
@@ -940,14 +1056,24 @@ fn view_content<'a>(
     //     .padding(5)
     //     .center_y()
     //     .into()
+    if pane_type == PaneType::Tasks {
+        container(pane_type.content(local_data,size))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(5)
+            .center_x()
+            .center_y()
+            .into()
+    } else {
+        container(scrollable(pane_type.content(local_data, size)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(5)
+            .center_x()
+            .center_y()
+            .into()
+    }
     
-    container(scrollable(pane_type.content(local_data, size)))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(5)
-        .center_x()
-        .center_y()
-        .into()
 }
 
 fn view_controls<'a>(
@@ -1187,9 +1313,9 @@ impl Chart<Message> for DiskUsageChart {
         self.cache.draw(bounds, draw_fn)
     }
 
-    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, mut chart: ChartBuilder<DB>) {}
+    fn build_chart<DB: DrawingBackend>(&self, _state: &Self::State, _chart: ChartBuilder<DB>) {}
 
-    fn draw_chart<DB: DrawingBackend>(&self, state: &Self::State, root: plotters_iced::DrawingArea<DB, plotters::coord::Shift>) {
+    fn draw_chart<DB: DrawingBackend>(&self, _state: &Self::State, root: plotters_iced::DrawingArea<DB, plotters::coord::Shift>) {
         use plotters::prelude::*;
         
         const USED_COLOR: RGBColor = RGBColor(255, 222, 153);
@@ -1326,7 +1452,7 @@ impl Chart<Message> for MemoryUsageChart {
                     .color(&plotters::style::colors::BLACK.mix(0.65))
                     .transform(FontTransform::Rotate90),
             )
-            .y_label_formatter(&|y| if let SegmentValue::CenterOf(yy) = y { if *yy == 1 { format!("SWAP") } else { format!("RAM") } } else { format!("Error") })
+            .y_label_formatter(&|y| if let SegmentValue::CenterOf(yy) = y { if *yy == 1 { String::from("SWAP") } else { String::from("RAM") } } else { String::from("Error") })
             .draw()
             .expect("failed to draw chart mesh");
         
@@ -1364,7 +1490,7 @@ impl Chart<Message> for MemoryUsageChart {
 
 mod tasks {
     use crate::*;
-    use iced::widget::canvas::{event::{self, Event}, Text};
+    use iced::widget::canvas::{event::{self, Event}};
     
     pub struct TasksListChart {
         pub process_info: Vec<ProcessInfo>,
@@ -1376,7 +1502,7 @@ mod tasks {
     #[derive(PartialEq, Eq)]
     pub enum ItemSort {
         Pid,
-        Name,
+        Nice,
         Status,
         User,
         Cpu,
@@ -1388,13 +1514,13 @@ mod tasks {
         pub fn by(u: usize) -> Self {
             match u {
                 0 => ItemSort::Pid,
-                1 => ItemSort::Name,
+                1 => ItemSort::Nice,
                 2 => ItemSort::Status,
                 3 => ItemSort::User,
                 4 => ItemSort::Cpu,
                 5 => ItemSort::Memory,
                 6 => ItemSort::Cmd,
-                _ => ItemSort::Name,
+                _ => ItemSort::Nice,
             }
         }
     }
@@ -1403,9 +1529,10 @@ mod tasks {
         pub fn new() -> Self {
             TasksListChart {
                 process_info: vec![],
-                separators: (1..7).into_iter().map(|i| (i as f32) / 7.0).collect(),
-                item_sort: ItemSort::Name,
-                rev: false,
+                separators: (1..7).into_iter().map(|i| (i as f32) / 12.0).collect(),
+                // separators: vec![9., 17., 25., 37., 44., 51.],
+                item_sort: ItemSort::Memory,
+                rev: true,
             }
         }
     
@@ -1421,7 +1548,7 @@ mod tasks {
             } else {
                 self.rev = match new_sort {
                     ItemSort::Pid => false,
-                    ItemSort::Name => false,
+                    ItemSort::Nice => false,
                     ItemSort::Status => true,
                     ItemSort::User => false,
                     ItemSort::Cpu => true,
@@ -1437,7 +1564,7 @@ mod tasks {
             self.process_info.sort_unstable_by(|a, b| {
                 match self.item_sort {
                     ItemSort::Pid => { a.pid.cmp(&b.pid) }
-                    ItemSort::Name => { a.name.cmp(&b.name) }
+                    ItemSort::Nice => { a.nice.cmp(&b.nice) }
                     ItemSort::Status => { a.status.cmp(&b.status) }
                     ItemSort::User => { a.user.cmp(&b.user) }
                     ItemSort::Cpu => { a.cpu.partial_cmp(&b.cpu).unwrap() }
@@ -1503,7 +1630,7 @@ mod tasks {
                             match state.0 {
                                 None => {
                                     
-                                    let selected = self.separators.iter().enumerate().find(|(i, &sep)| {
+                                    let selected = self.separators.iter().enumerate().find(|(_i, &sep)| {
                                         f32::abs(cursor_position.x - (start + sep*width)) <= 2.5
                                         && cursor_position.y >= start
                                         && cursor_position.y <= start + line_height
@@ -1513,7 +1640,7 @@ mod tasks {
                                     let mut iter2 = iter.clone();
                                     iter2.next();
                                     let iter = iter.zip(iter2);
-                                    let over = iter.enumerate().find(|(i, (&sep1, &sep2))| {
+                                    let over = iter.enumerate().find(|(_i, (&sep1, &sep2))| {
                                         cursor_position.x > (start + sep1*width) + 2.5
                                         && cursor_position.x < (start + sep2*width) - 2.5
                                         && cursor_position.y >= start
@@ -1620,9 +1747,6 @@ mod tasks {
 
                                     None
                                 }
-                                _ => {
-                                    None
-                                }
                             }
                         }
                         _ => None,
@@ -1700,8 +1824,8 @@ mod tasks {
             );
 
             let write: Vec<_> = std::iter::once(&0.).chain(self.separators.iter()).enumerate().map(|(i, &sep)| {
-                let sp2 = *self.separators.get(i).unwrap_or(&100.);
-                let max_str_size = ((sp2 - sep)*width/6.0) as usize - 2;
+                let sp2 = *self.separators.get(i).unwrap_or(&1.);
+                let max_str_size = std::cmp::max(((sp2 - sep)*width/6.0) as usize, 2) - 2;
                 move |y, mut str: String| {
                     if str.len() > max_str_size {
                         str.truncate(max_str_size);
@@ -1717,7 +1841,7 @@ mod tasks {
             }).collect();
             
             frame.fill_text(write[0](start, String::from("PID")));
-            frame.fill_text(write[1](start, String::from("Name")));
+            frame.fill_text(write[1](start, String::from("Nice")));
             frame.fill_text(write[2](start, String::from("Status")));
             frame.fill_text(write[3](start, String::from("User")));
             frame.fill_text(write[4](start, String::from("CPU%")));
@@ -1725,8 +1849,11 @@ mod tasks {
             frame.fill_text(write[6](start, String::from("Command")));
             for (i, info) in self.process_info.iter().enumerate() {
                 let y = start + ((i + 1) as f32) * line_height;
+                if y > start + height - line_height {
+                    break;
+                }
                 frame.fill_text(write[0](y, format!("{}", info.pid)));
-                frame.fill_text(write[1](y, info.name.to_string()));
+                frame.fill_text(write[1](y, info.nice.to_string()));
                 frame.fill_text(write[2](y, info.status.to_string()));
                 frame.fill_text(write[3](y, info.user.to_string()));
                 frame.fill_text(write[4](y, format!("{}", info.cpu)));
