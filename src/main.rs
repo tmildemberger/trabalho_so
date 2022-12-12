@@ -11,6 +11,7 @@ use iced::{
     Application, Color, Command, Element, Length, Settings, Size, Subscription
 };
 use iced_native::Rectangle;
+use iced::mouse;
 use iced::widget::canvas::Cursor;
 use iced_lazy::responsive;
 use iced_native::{event, subscription, Event};
@@ -123,7 +124,7 @@ fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
 }
 
 #[derive(Default, Clone)]
-struct ProcessInfo {
+pub struct ProcessInfo {
     pid: usize,
     name: String,
     status: String,
@@ -149,12 +150,14 @@ struct LocalData {
     cpu_charts: Vec<CpuUsageChart>,
     disk_charts: Vec<DiskUsageChart>,
     memory_chart: Option<MemoryUsageChart>,
+    tasks_chart: Option<tasks::TasksListChart>,
 }
 
 struct Example {
     panes: pane_grid::State<Pane>,
     panes_created: usize,
     focus: Option<pane_grid::Pane>,
+    tasks_pane: Option<pane_grid::Pane>,
     last_tick: u64,
     shared_data: Arc<Mutex<CollectedData>>,
     shared_tick: Arc<AtomicU64>,
@@ -177,6 +180,8 @@ enum Message {
     UnFocus,
     Tick,
     ChangeType(pane_grid::Pane, PaneType),
+    DraggedTask(usize, f32),
+    SortTasks(usize),
 }
 
 impl LocalData {
@@ -208,6 +213,16 @@ impl LocalData {
             memory_chart.set_data((mem_data.0, mem_data.1), (mem_data.2, mem_data.3), mem_data.4.clone(), mem_data.5.clone(), mem_data.6.clone());
         }
     }
+
+    fn update_tasks(&mut self) {
+        if self.tasks_chart.is_none() {
+            self.tasks_chart = Some(tasks::TasksListChart::new());
+        }
+        if let Some(tasks_chart) = &mut self.tasks_chart {
+            let process_data = &self.current_data_copy.process_list;
+            tasks_chart.set_data(process_data);
+        }
+    }
 }
 
 impl Application for Example {
@@ -224,6 +239,7 @@ impl Application for Example {
                 panes,
                 panes_created: 1,
                 focus: None,
+                tasks_pane: None,
                 last_tick: 0,
                 shared_data: flags.0,
                 shared_tick: flags.1,
@@ -232,6 +248,7 @@ impl Application for Example {
                     cpu_charts: Vec::new(),
                     disk_charts: Vec::new(),
                     memory_chart: None,
+                    tasks_chart: None,
                 },
             },
             Command::none(),
@@ -333,12 +350,29 @@ impl Application for Example {
                     self.local_data.update_cpus();
                     self.local_data.update_disks();
                     self.local_data.update_memory();
+                    self.local_data.update_tasks();
                 }
             }
             Message::ChangeType(pane, new_pane_type) => {
                 if let Some(Pane { pane_type, ..}) = self.panes.get_mut(&pane)
                 {
-                    *pane_type = new_pane_type;
+                    if *pane_type == PaneType::Tasks && new_pane_type != PaneType::Tasks {
+                        self.tasks_pane = None;
+                    }
+                    if new_pane_type != PaneType::Tasks || self.tasks_pane.is_none() {
+                        *pane_type = new_pane_type;
+                        self.tasks_pane = Some(pane);
+                    }
+                }
+            }
+            Message::DraggedTask(selected, new_sep) => {
+                if let Some(tasks_chart) = &mut self.local_data.tasks_chart {
+                    tasks_chart.separators[selected] = new_sep;
+                }
+            }
+            Message::SortTasks(selected) => {
+                if let Some(tasks_chart) = &mut self.local_data.tasks_chart {
+                    tasks_chart.sort_by(selected);
                 }
             }
         }
@@ -748,50 +782,58 @@ impl PaneType {
                 content.into()
             }
             PaneType::Tasks => {
-                // let mut content = column![
-                //     text("Tasks").size(24),
-                // ]
-                // .width(Length::Fill)
-                // .spacing(10)
-                // .align_items(Alignment::Center);
-                let mut pid = column![].width(Length::Units(50)).spacing(2).align_items(Alignment::Start);
-                let mut name = column![].width(Length::Units(200)).spacing(2).align_items(Alignment::Start);
-                let mut status = column![].width(Length::Units(70)).spacing(2).align_items(Alignment::Start);
-                let mut user = column![].width(Length::Units(70)).spacing(2).align_items(Alignment::Start);
-                let mut cpu = column![].width(Length::Units(40)).spacing(2).align_items(Alignment::End);
-                let mut memory = column![].width(Length::Units(45)).spacing(2).align_items(Alignment::End);
-                let mut cmd = column![].width(Length::Fill).spacing(2).align_items(Alignment::Start);
-
-                pid = pid.push(text("PID").size(16));
-                name = name.push(text("Name").size(16));
-                status = status.push(text("Status").size(16));
-                user = user.push(text("User").size(16));
-                cpu = cpu.push(text("CPU%").size(16));
-                memory = memory.push(text("MEM%").size(16));
-                cmd = cmd.push(text("Command").size(16));
-
-                for task in &data.current_data_copy.process_list {
-                    pid = pid.push(text(format!("{}", task.pid)).size(16));
-                    name = name.push(text(format!("{}", task.name)).size(16));
-                    status = status.push(text(format!("{}", task.status)).size(16));
-                    user = user.push(text(format!("{}", task.user)).size(16));
-                    cpu = cpu.push(text(format!("{}", task.cpu)).size(16));
-                    memory = memory.push(text(format!("{}", task.memory)).size(16));
-                    cmd = cmd.push(text(format!("{}", task.cmd)).size(16).height(Length::Units(16)));
-                }
-
-                let content = row![
-                    pid,
-                    name,
-                    status,
-                    user,
-                    cpu,
-                    memory,
-                    cmd,
+                let mut content = column![
+                    text("Tasks").size(24),
                 ]
                 .width(Length::Fill)
-                .spacing(5)
-                .align_items(Alignment::Start);
+                .spacing(0)
+                .align_items(Alignment::Center);
+
+
+                if let Some(tasks_chart) = &data.tasks_chart {
+                    content = content.push(canvas(tasks_chart)
+                        .width(Length::Fill)
+                        .height(Length::Units(550))
+                    );
+                }
+                // let mut pid = column![].width(Length::Units(50)).spacing(2).align_items(Alignment::Start);
+                // let mut name = column![].width(Length::Units(200)).spacing(2).align_items(Alignment::Start);
+                // let mut status = column![].width(Length::Units(70)).spacing(2).align_items(Alignment::Start);
+                // let mut user = column![].width(Length::Units(70)).spacing(2).align_items(Alignment::Start);
+                // let mut cpu = column![].width(Length::Units(40)).spacing(2).align_items(Alignment::End);
+                // let mut memory = column![].width(Length::Units(45)).spacing(2).align_items(Alignment::End);
+                // let mut cmd = column![].width(Length::Fill).spacing(2).align_items(Alignment::Start);
+
+                // pid = pid.push(text("PID").size(16));
+                // name = name.push(text("Name").size(16));
+                // status = status.push(text("Status").size(16));
+                // user = user.push(text("User").size(16));
+                // cpu = cpu.push(text("CPU%").size(16));
+                // memory = memory.push(text("MEM%").size(16));
+                // cmd = cmd.push(text("Command").size(16));
+
+                // for task in &data.current_data_copy.process_list {
+                //     pid = pid.push(text(format!("{}", task.pid)).size(16));
+                //     name = name.push(text(format!("{}", task.name)).size(16));
+                //     status = status.push(text(format!("{}", task.status)).size(16));
+                //     user = user.push(text(format!("{}", task.user)).size(16));
+                //     cpu = cpu.push(text(format!("{}", task.cpu)).size(16));
+                //     memory = memory.push(text(format!("{}", task.memory)).size(16));
+                //     cmd = cmd.push(text(format!("{}", task.cmd)).size(16).height(Length::Units(16)));
+                // }
+
+                // let content = row![
+                //     pid,
+                //     name,
+                //     status,
+                //     user,
+                //     cpu,
+                //     memory,
+                //     cmd,
+                // ]
+                // .width(Length::Fill)
+                // .spacing(5)
+                // .align_items(Alignment::Start);
                 
                 content.into()
             }
@@ -1306,6 +1348,394 @@ impl Chart<Message> for MemoryUsageChart {
                 bar
             }))
             .expect("failed to draw chart data");
+    }
+}
+
+
+// struct ProcessInfo {
+//     pid: usize,
+//     name: String,
+//     status: String,
+//     user: String,
+//     cpu: f64,
+//     memory: f64,
+//     cmd: String,
+// }
+
+mod tasks {
+    use crate::*;
+    use iced::widget::canvas::{event::{self, Event}, Text};
+    
+    pub struct TasksListChart {
+        pub process_info: Vec<ProcessInfo>,
+        pub separators: Vec<f32>,
+        pub item_sort: ItemSort,
+        pub rev: bool,
+    }
+
+    #[derive(PartialEq, Eq)]
+    pub enum ItemSort {
+        Pid,
+        Name,
+        Status,
+        User,
+        Cpu,
+        Memory,
+        Cmd,
+    }
+
+    impl ItemSort {
+        pub fn by(u: usize) -> Self {
+            match u {
+                0 => ItemSort::Pid,
+                1 => ItemSort::Name,
+                2 => ItemSort::Status,
+                3 => ItemSort::User,
+                4 => ItemSort::Cpu,
+                5 => ItemSort::Memory,
+                6 => ItemSort::Cmd,
+                _ => ItemSort::Name,
+            }
+        }
+    }
+    
+    impl TasksListChart {
+        pub fn new() -> Self {
+            TasksListChart {
+                process_info: vec![],
+                separators: (1..7).into_iter().map(|i| (i as f32) / 7.0).collect(),
+                item_sort: ItemSort::Name,
+                rev: false,
+            }
+        }
+    
+        pub fn set_data(&mut self, process_info: &[ProcessInfo]) {
+            self.process_info = process_info.to_owned();
+            self.sort();
+        }
+        
+        pub fn sort_by(&mut self, u: usize) {
+            let new_sort = ItemSort::by(u);
+            if self.item_sort == new_sort {
+                self.rev = !self.rev;
+            } else {
+                self.rev = match new_sort {
+                    ItemSort::Pid => false,
+                    ItemSort::Name => false,
+                    ItemSort::Status => true,
+                    ItemSort::User => false,
+                    ItemSort::Cpu => true,
+                    ItemSort::Memory => true,
+                    ItemSort::Cmd => false,
+                }
+            }
+            self.item_sort = new_sort;
+            self.sort();
+        }
+
+        pub fn sort(&mut self) {
+            self.process_info.sort_unstable_by(|a, b| {
+                match self.item_sort {
+                    ItemSort::Pid => { a.pid.cmp(&b.pid) }
+                    ItemSort::Name => { a.name.cmp(&b.name) }
+                    ItemSort::Status => { a.status.cmp(&b.status) }
+                    ItemSort::User => { a.user.cmp(&b.user) }
+                    ItemSort::Cpu => { a.cpu.partial_cmp(&b.cpu).unwrap() }
+                    ItemSort::Memory => { a.memory.partial_cmp(&b.memory).unwrap() }
+                    ItemSort::Cmd => { a.cmd.cmp(&b.cmd) }
+                }
+            });
+            if self.rev {
+                self.process_info.reverse();
+            }
+        }
+    }
+    
+    #[derive(Debug, Clone, Copy)]
+    pub enum Pending {
+        One {
+            selected: usize,
+            diff: f32,
+        },
+        // Two { from: Point, to: Point },
+    }
+    
+    impl canvas::Program<Message> for TasksListChart {
+        type State = (Option<Pending>, mouse::Interaction);
+    
+        fn update(
+            &self,
+            state: &mut Self::State,
+            event: Event,
+            bounds: Rectangle,
+            cursor: Cursor,
+        ) -> (event::Status, Option<Message>) {
+            use std::iter::once;
+            // if let Some(Pending::One { selected, diff }) = state.0 {
+            //     if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
+            //         state.0 = None;
+            //     } else if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
+            //         let c = Cursor::Available(position);
+            //         if let Some(position) = c.position_from(bounds.position()) {
+
+            //         }
+            //     }
+            // }
+            let cursor_position =
+                if let Some(position) = cursor.position_from(bounds.position()) {
+                    position
+                } else {
+                    return (event::Status::Ignored, None);
+                };
+    
+    
+            let padding = 5.;
+            let start = padding;
+            let width = bounds.width - (2. * padding);
+            let _height = bounds.height - (2. * padding);
+
+            let line_height = 18.;
+    
+            match event {
+                Event::Mouse(mouse_event) => {
+                    let message = match mouse_event {
+                        mouse::Event::ButtonPressed(mouse::Button::Left) => {
+                            match state.0 {
+                                None => {
+                                    
+                                    let selected = self.separators.iter().enumerate().find(|(i, &sep)| {
+                                        f32::abs(cursor_position.x - (start + sep*width)) <= 2.5
+                                        && cursor_position.y >= start
+                                        && cursor_position.y <= start + line_height
+                                    });
+                                    
+                                    let iter = once(&0.).chain(self.separators.iter()).chain(once(&100.));
+                                    let mut iter2 = iter.clone();
+                                    iter2.next();
+                                    let iter = iter.zip(iter2);
+                                    let over = iter.enumerate().find(|(i, (&sep1, &sep2))| {
+                                        cursor_position.x > (start + sep1*width) + 2.5
+                                        && cursor_position.x < (start + sep2*width) - 2.5
+                                        && cursor_position.y >= start
+                                        && cursor_position.y <= start + line_height
+                                    });
+    
+                                    
+                                    if let Some((selected, &sep)) = selected {
+                                        state.0 = Some(Pending::One {
+                                            selected,
+                                            diff: cursor_position.x - (start + sep*width),
+                                        });
+                                        state.1 = mouse::Interaction::ResizingHorizontally;
+
+                                        None
+                                    } else if let Some((selected, _)) = over {
+                                        state.1 = mouse::Interaction::Pointer;
+                                        Some(Message::SortTasks(selected))
+                                    } else {
+                                        state.1 = mouse::Interaction::Idle;
+                                        None
+                                    }
+                                }
+                                _ => {
+                                    None
+                                }
+                            }
+                        }
+                        mouse::Event::ButtonReleased(mouse::Button::Left) => {
+                            match state.0 {
+                                Some(Pending::One { .. }) => {
+                                    state.0 = None;
+    
+                                    None
+                                }
+                                _ => {
+                                    None
+                                }
+                            }
+                        }
+                        mouse::Event::CursorMoved { position } => {
+                            let pos_x = if let Some(position) = Cursor::Available(position).position_from(bounds.position()) {
+                                position.x
+                            } else {
+                                cursor_position.x
+                            };
+                            match state.0 {
+                                Some(Pending::One { selected, diff }) => {
+                                    let pos_x = pos_x - diff;
+                                    let prev = if selected == 0 {
+                                        None
+                                    } else {
+                                        Some(selected - 1)
+                                    };
+                                    let next = if selected == 5 {
+                                        None
+                                    } else {
+                                        Some(selected + 1)
+                                    };
+                                    
+                                    let mut ok = true;
+                                    
+    
+                                    if let Some(prev) = prev {
+                                        let sep = self.separators[prev];
+                                        if pos_x <= start + sep*width + 5. {
+                                            ok = false;
+                                        }
+                                    } else if pos_x <= start + 5.{
+                                        ok = false;
+                                    }
+    
+                                    if let Some(next) = next {
+                                        let sep = self.separators[next];
+                                        if pos_x >= start + sep*width - 5. {
+                                            ok = false;
+                                        }
+                                    } else if pos_x >= start + width - 5. {
+                                        ok = false;
+                                    }
+    
+                                    if ok {
+                                        Some(Message::DraggedTask(selected, (pos_x - start) / width))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => {
+
+                                    if self.separators.iter().any(|&sep| {
+                                        f32::abs(pos_x - (start + sep*width)) <= 2.5
+                                        && cursor_position.y >= start
+                                        && cursor_position.y <= start + line_height
+                                    }) {
+                                        state.1 = mouse::Interaction::ResizingHorizontally;
+                                    } else if cursor_position.x > start + 2.5
+                                    && cursor_position.x < start + width - 2.5
+                                    && cursor_position.y >= start
+                                    && cursor_position.y <= start + line_height {
+                                        state.1 = mouse::Interaction::Pointer;
+                                    } else {
+                                        state.1 = mouse::Interaction::Idle;
+                                    }
+
+                                    None
+                                }
+                                _ => {
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
+    
+                    (event::Status::Captured, message)
+                }
+                _ => (event::Status::Ignored, None),
+            }
+        }
+
+        fn mouse_interaction(
+            &self,
+            state: &Self::State,
+            _bounds: Rectangle<f32>,
+            _cursor: Cursor
+        ) -> mouse::Interaction {
+            state.1
+        }
+    
+        fn draw(
+            &self,
+            _state: &Self::State,
+            _theme: &Theme,
+            bounds: Rectangle,
+            _cursor: Cursor
+        ) -> Vec<Geometry>{
+            let mut frame = Frame::new(bounds.size());
+    
+            let padding = 5.;
+            let start = padding;
+            let width = bounds.width - (2. * padding);
+            let height = bounds.height - (2. * padding);
+
+            let line_height = 18.;
+    
+            frame.fill(&Path::rectangle(
+                    Point {
+                        x: padding,
+                        y: padding,
+                    },
+                    Size {
+                        width,
+                        height,
+                    },
+                ),
+                Color::WHITE,
+            );
+    
+            for sep in &self.separators {
+                frame.stroke(&Path::line(
+                        Point {
+                            x: f32::trunc(start + sep*width),
+                            y: f32::trunc(start),
+                        },
+                        Point {
+                            x: f32::trunc(start + sep*width),
+                            y: f32::trunc(start + height),
+                        },
+                    ),
+                    Stroke::default().with_width(1.),
+                );
+            }
+            frame.stroke(&Path::line(
+                    Point {
+                        x: f32::trunc(start),
+                        y: f32::trunc(start + line_height),
+                    },
+                    Point {
+                        x: f32::trunc(start + width),
+                        y: f32::trunc(start + line_height),
+                    },
+                ),
+                Stroke::default().with_width(1.),
+            );
+
+            let write: Vec<_> = std::iter::once(&0.).chain(self.separators.iter()).enumerate().map(|(i, &sep)| {
+                let sp2 = *self.separators.get(i).unwrap_or(&100.);
+                let max_str_size = ((sp2 - sep)*width/6.0) as usize - 2;
+                move |y, mut str: String| {
+                    if str.len() > max_str_size {
+                        str.truncate(max_str_size);
+                        str.push('.');
+                        str.push('.');
+                    }
+                    canvas::Text {
+                        content: str,
+                        position: Point::new(start + sep*width + 2., y),
+                        ..Default::default()
+                    }
+                }
+            }).collect();
+            
+            frame.fill_text(write[0](start, String::from("PID")));
+            frame.fill_text(write[1](start, String::from("Name")));
+            frame.fill_text(write[2](start, String::from("Status")));
+            frame.fill_text(write[3](start, String::from("User")));
+            frame.fill_text(write[4](start, String::from("CPU%")));
+            frame.fill_text(write[5](start, String::from("MEM%")));
+            frame.fill_text(write[6](start, String::from("Command")));
+            for (i, info) in self.process_info.iter().enumerate() {
+                let y = start + ((i + 1) as f32) * line_height;
+                frame.fill_text(write[0](y, format!("{}", info.pid)));
+                frame.fill_text(write[1](y, info.name.to_string()));
+                frame.fill_text(write[2](y, info.status.to_string()));
+                frame.fill_text(write[3](y, info.user.to_string()));
+                frame.fill_text(write[4](y, format!("{}", info.cpu)));
+                frame.fill_text(write[5](y, format!("{}", info.memory)));
+                frame.fill_text(write[6](y, info.cmd.to_string()));
+            }
+    
+            vec![frame.into_geometry()]
+        }
     }
 }
 
