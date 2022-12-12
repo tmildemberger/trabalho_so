@@ -39,7 +39,7 @@ pub fn main() -> iced::Result {
     
         thread::spawn(move || {
             loop {
-                collect_data(&thread_data);
+                collect_infos(&thread_data);
                 thread_tick.fetch_add(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(1));
             }
@@ -66,6 +66,32 @@ pub fn main() -> iced::Result {
         thread::spawn(move || {
             loop {
                 collect_memory(&thread_data);
+                thread_tick.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
+
+    {
+        let thread_tick = Arc::clone(&shared_tick);
+        let thread_data = Arc::clone(&shared_data);
+    
+        thread::spawn(move || {
+            loop {
+                collect_cpu(&thread_data);
+                thread_tick.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
+
+    {
+        let thread_tick = Arc::clone(&shared_tick);
+        let thread_data = Arc::clone(&shared_data);
+    
+        thread::spawn(move || {
+            loop {
+                collect_disks(&thread_data);
                 thread_tick.fetch_add(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(2));
             }
@@ -147,15 +173,15 @@ fn collect_memory(shared_data: &Arc<Mutex<CollectedData>>) {
 
     let mut s0 = String::new();
     process0.stdout.unwrap().read_to_string(&mut s0).unwrap();
-    let mut lines = s0.lines();
+    let lines = s0.lines();
     let tech = lines.map(str::trim).find_map(|s| {
         if s.starts_with("Type: ") {
-            let (a, b) = s.split_at(6);
+            let (_a, b) = s.split_at(6);
             Some(b.to_string())
         } else {
             None
         }
-    }).unwrap_or(String::from("DDR3"));
+    }).unwrap_or_else(|| String::from("DDR3"));
 
     let process1 = Command::new("/usr/bin/free")
                         .stdout(Stdio::piped())
@@ -172,7 +198,7 @@ fn collect_memory(shared_data: &Arc<Mutex<CollectedData>>) {
 
     let mut last_whitespace = false;
 
-    let fields: Vec<_> = line.trim().splitn(7, |c: char| {
+    let mem_fields: Vec<_> = mem_line.trim().splitn(7, |c: char| {
         if c.is_whitespace() {
             if last_whitespace {
                 return false
@@ -185,64 +211,188 @@ fn collect_memory(shared_data: &Arc<Mutex<CollectedData>>) {
         }
     }).map(str::trim).collect();
     last_whitespace = false;
-    let mem_data = if fields.len() == 7 {
-        let total: u64 = fields[1].parse().unwrap();
-        let used: u64 = fields[2].parse().unwrap();
-        let free: u64 = fields[3].parse().unwrap();
-        let buff: u64 = fields[5].parse().unwrap();
+    let swap_fields: Vec<_> = swap_line.trim().splitn(4, |c: char| {
+        if c.is_whitespace() {
+            if last_whitespace {
+                return false
+            }
+            last_whitespace = true;
+            true
+        } else {
+            last_whitespace = false;
+            false
+        }
+    }).map(str::trim).collect();
+    let mem_data = if mem_fields.len() == 7 {
+        let total: u64 = mem_fields[1].parse().unwrap();
+        let used: u64 = mem_fields[2].parse().unwrap();
+        let free: u64 = mem_fields[3].parse().unwrap();
+        let buff: u64 = mem_fields[5].parse().unwrap();
         (total, used, free, buff)
     } else {
         panic!("wrong");
     };
-    let swap_data = if fields.len() == 4 {
-        let total: u64 = fields[1].parse().unwrap();
-        let used: u64 = fields[2].parse().unwrap();
-        let free: u64 = fields[3].parse().unwrap();
+    let swap_data = if swap_fields.len() == 4 {
+        let total: u64 = swap_fields[1].parse().unwrap();
+        let used: u64 = swap_fields[2].parse().unwrap();
+        let free: u64 = swap_fields[3].parse().unwrap();
         let buff: u64 = 0;
         (total, used, free, buff)
     } else {
         panic!("panic");
     };
-    }
-    
-    // data.ram_usage = (68.4, 10.2, 22.4, 36.7, String::from("DDR3"), String::from("7.66G"), String::from("7.63G"));
+
+    let mem_total = format!("{:.2}G", (mem_data.0 as f64) / (1024.*1024.*1024.));
+    let swap_total = format!("{:.2}G", (swap_data.0 as f64) / (1024.*1024.*1024.));
+    let mem_used = ((mem_data.1 as f64) / (mem_data.0 as f64)) * 100.;
+    let mem_buff = ((mem_data.3 as f64) / (mem_data.0 as f64)) * 100.;
+    let swap_used = ((swap_data.1 as f64) / (swap_data.0 as f64)) * 100.;
+    let swap_buff = 0.0_f64;
+
+    let ram_usage = (mem_used, mem_buff, swap_used, swap_buff, tech, mem_total, swap_total);
 
     let mut data = shared_data.lock().unwrap();
-    data.process_list = process_list;
-    data.updated_tasks = true;
+    data.ram_usage = ram_usage;
+    data.updated_memory = true;
     data.tick += 1;
 }
 
-fn collect_data(shared_data: &Arc<Mutex<CollectedData>>) {
-    let mut data = shared_data.lock().unwrap();
+fn collect_cpu(shared_data: &Arc<Mutex<CollectedData>>) {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    let process0 = Command::new("/usr/bin/top")
+                        .stdout(Stdio::piped())
+                        .args(["-b", "-d", "0.5", "-n", "2"])
+                        .spawn()
+                        .expect("failed to execute process0");
 
-    if data.cpu_usage.is_empty() {
-        for _i in 0..4 {
-            data.cpu_usage.push(VecDeque::new());
-        }
+    let mut s0 = String::new();
+    process0.stdout.unwrap().read_to_string(&mut s0).unwrap();
+    let mut a = s0.split("top - ");
+    a.next();
+    let s0 = a.next().unwrap();
+    let lines = s0.lines();
+
+    let mut last_whitespace = false;
+    let usages = lines.filter(|l| l.starts_with("%Cpu")).map(|l| {
+        last_whitespace = false;
+        // println!("{}", l.trim().splitn(7, ',').find(|s| s.contains("id")).trim().unwrap());
+        100. - l.trim().splitn(7, ',').find(|s| s.contains("id")).unwrap().trim().split(' ').next().unwrap().trim().replace(',', ".").parse::<f64>().unwrap()
+    });
+
+    let cpu_usage: Vec<_> = usages.collect();
+
+    let mut data = shared_data.lock().unwrap();
+    while data.cpu_usage.len() < cpu_usage.len() {
+        data.cpu_usage.push(VecDeque::new());
     }
 
-    let new_cpu_points = match data.tick % 4 {
-        0 => vec![22.0, 33.3, 75.9, 0.0],
-        1 => vec![33.3, 75.9, 0.0, 22.0],
-        2 => vec![75.9, 0.0, 22.0, 33.3],
-        3 => vec![0.0, 22.0, 33.3, 75.9],
-        _ => vec![22.0, 33.3, 75.9, 0.0],
-    };
-    for i in 0..4 {
-        data.cpu_usage[i].push_front(new_cpu_points[i]);
+    for (i, usage) in cpu_usage.into_iter().enumerate() {
+        data.cpu_usage[i].push_front(usage);
         if data.cpu_usage[i].len() > MAX_POINTS {
             data.cpu_usage[i].pop_back();
         }
     }
-    data.disk_usage = vec![(94.1, String::from("SSD"), String::from("256G")), (22.2, String::from("HDD"), String::from("2TB"))];
-    
-    data.extra_infos = vec![
-        String::from("Linux 64 bits"),
-        String::from("Intel Core i3"),
-        String::from("Nvidia 940M"),
-    ];
+    // println!("{:?}", data.cpu_usage);
+    data.updated_cpu = true;
+    data.tick += 1;
+}
 
+fn collect_disks(shared_data: &Arc<Mutex<CollectedData>>) {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    // let process0 = Command::new("/usr/bin/ls")
+    //                     .stdout(Stdio::piped())
+    //                     .args(["/sys/block"])
+    //                     .spawn()
+    //                     .expect("failed to execute process0");
+
+    // let mut s0 = String::new();
+    // process0.stdout.unwrap().read_to_string(&mut s0).unwrap();
+    // let devices = s0.trim().split(|c: char| {
+    //     if c.is_whitespace() {
+    //         if last_whitespace {
+    //             return false
+    //         }
+    //         last_whitespace = true;
+    //         true
+    //     } else {
+    //         last_whitespace = false;
+    //         false
+    //     }
+    // }).map(str::to_string);
+    // last_whitespace = false;
+
+
+    let process1 = Command::new("/usr/bin/df")
+                        .stdout(Stdio::piped())
+                        .args(["-T"])
+                        .spawn()
+                        .expect("failed to execute process1");
+
+    let mut s1 = String::new();
+    process1.stdout.unwrap().read_to_string(&mut s1).unwrap();
+    let mut lines = s1.lines();
+    lines.next();
+
+    let mut last_whitespace = false;
+    let mut v: Vec<Vec<&str>> = vec![];
+    for line in lines.filter(|l| l.contains("ext") || l.contains("fat")) {
+        v.push(line.trim().split(|c: char| {
+            if c.is_whitespace() {
+                if last_whitespace {
+                    return false
+                }
+                last_whitespace = true;
+                true
+            } else {
+                last_whitespace = false;
+                false
+            }
+        }).collect());
+        last_whitespace = false;
+    }
+    let partitions: Vec<_> = v.into_iter().map(|s| {
+        // println!("_{}_ _{}_ _{}_", s[5].trim().split('%').next().unwrap(), s[0], s[2]);
+        (s[5].trim().split('%').next().unwrap().parse::<f64>().unwrap(), s[0].to_string(), format!("{:.0}G", s[2].trim().parse::<f64>().unwrap() / (1024. * 1024.)))
+    }).collect();
+
+    // let cpu_usage: Vec<_> = usages.collect();
+
+    let mut data = shared_data.lock().unwrap();
+    data.disk_usage = partitions;
+    data.updated_disks = true;
+    data.tick += 1;
+}
+
+fn collect_infos(shared_data: &Arc<Mutex<CollectedData>>) {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    
+    let process1 = Command::new("/usr/bin/uname")
+                        .stdout(Stdio::piped())
+                        .args(["-a"])
+                        .spawn()
+                        .expect("failed to execute process1");
+    
+    let process2 = Command::new("/usr/bin/lshw")
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .args(["-short"])
+                        .spawn()
+                        .expect("failed to execute process1");
+
+    let mut s1 = String::new();
+    process1.stdout.unwrap().read_to_string(&mut s1).unwrap();
+    let lines1 = s1.lines().map(str::to_string);
+    
+    let mut s2 = String::new();
+    process2.stdout.unwrap().read_to_string(&mut s2).unwrap();
+    let lines2 = s2.lines().map(str::to_string);
+    
+    let lines = lines1.chain(std::iter::once(String::from("\n"))).chain(lines2).collect();
+    let mut data = shared_data.lock().unwrap();
+    data.extra_infos = lines;
     data.tick += 1;
 }
 
@@ -265,6 +415,9 @@ struct CollectedData {
     process_list: Vec<ProcessInfo>,
     extra_infos: Vec<String>,
     updated_tasks: bool,
+    updated_memory: bool,
+    updated_cpu: bool,
+    updated_disks: bool,
     tick: u64,
 }
 
@@ -286,6 +439,7 @@ struct Example {
     shared_data: Arc<Mutex<CollectedData>>,
     shared_tick: Arc<AtomicU64>,
     local_data: LocalData,
+    show_title_bar: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,8 +457,10 @@ enum Message {
     UnFocus,
     Tick,
     ChangeType(pane_grid::Pane, PaneType),
+    ChangeTypeFocused(PaneType),
     DraggedTask(usize, f32),
     SortTasks(usize),
+    ToggleTitleBar,
 }
 
 impl LocalData {
@@ -373,6 +529,7 @@ impl Application for Example {
                     memory_chart: None,
                     tasks_chart: None,
                 },
+                show_title_bar: false,
             },
             Command::none(),
         )
@@ -459,10 +616,25 @@ impl Application for Example {
                         let mut data = self.shared_data.lock().unwrap();
                         self.local_data.current_data_copy = data.clone();
                         data.updated_tasks = false;
+                        data.updated_memory = false;
+                        data.updated_cpu = false;
+                        data.updated_disks = false;
                     }
                     self.local_data.update_cpus();
                     self.local_data.update_disks();
-                    self.local_data.update_memory();
+
+                    if self.local_data.current_data_copy.updated_cpu {
+                        self.local_data.current_data_copy.updated_cpu = false;
+                        self.local_data.update_cpus();
+                    }
+                    if self.local_data.current_data_copy.updated_disks {
+                        self.local_data.current_data_copy.updated_disks = false;
+                        self.local_data.update_disks();
+                    }
+                    if self.local_data.current_data_copy.updated_memory {
+                        self.local_data.current_data_copy.updated_memory = false;
+                        self.local_data.update_memory();
+                    }
                     if self.local_data.current_data_copy.updated_tasks {
                         self.local_data.current_data_copy.updated_tasks = false;
                         self.local_data.update_tasks();
@@ -472,12 +644,31 @@ impl Application for Example {
             Message::ChangeType(pane, new_pane_type) => {
                 if let Some(Pane { pane_type, ..}) = self.panes.get_mut(&pane)
                 {
-                    if *pane_type == PaneType::Tasks && new_pane_type != PaneType::Tasks {
-                        self.tasks_pane = None;
+                    if new_pane_type != PaneType::Tasks {
+                        if *pane_type == PaneType::Tasks {
+                            self.tasks_pane = None;
+                        }
+                        *pane_type = new_pane_type;
                     }
-                    if new_pane_type != PaneType::Tasks || self.tasks_pane.is_none() {
+                    if new_pane_type == PaneType::Tasks && self.tasks_pane.is_none() {
                         *pane_type = new_pane_type;
                         self.tasks_pane = Some(pane);
+                    }
+                }
+            }
+            Message::ChangeTypeFocused(new_pane_type) => {
+                if let Some(pane) = &mut self.focus {
+                    if let Some(Pane { pane_type, ..}) = self.panes.get_mut(pane) {
+                        if new_pane_type != PaneType::Tasks {
+                            if *pane_type == PaneType::Tasks {
+                                self.tasks_pane = None;
+                            }
+                            *pane_type = new_pane_type;
+                        }
+                        if new_pane_type == PaneType::Tasks && self.tasks_pane.is_none() {
+                            *pane_type = new_pane_type;
+                            self.tasks_pane = Some(*pane);
+                        }
                     }
                 }
             }
@@ -490,6 +681,9 @@ impl Application for Example {
                 if let Some(tasks_chart) = &mut self.local_data.tasks_chart {
                     tasks_chart.sort_by(selected);
                 }
+            }
+            Message::ToggleTitleBar => {
+                self.show_title_bar = !self.show_title_bar;
             }
         }
 
@@ -566,7 +760,7 @@ impl Application for Example {
                 )
             }));
 
-            if is_focused {
+            if self.show_title_bar {
                 grid
                 .title_bar(title_bar)
                 .style(if is_focused {
@@ -619,10 +813,12 @@ fn handle_hotkey(key_code: keyboard::KeyCode, control: bool) -> Option<Message> 
         }
     } else {
         match key_code {
-            KeyCode::V => Some(Message::SplitFocused(Axis::Vertical)),
-            KeyCode::H => Some(Message::SplitFocused(Axis::Horizontal)),
-            KeyCode::W => Some(Message::CloseFocused),
-            KeyCode::U => Some(Message::UnFocus),
+            KeyCode::C => Some(Message::ChangeTypeFocused(PaneType::Cpu)),
+            KeyCode::M => Some(Message::ChangeTypeFocused(PaneType::Memory)),
+            KeyCode::T => Some(Message::ChangeTypeFocused(PaneType::Tasks)),
+            KeyCode::D => Some(Message::ChangeTypeFocused(PaneType::Disks)),
+            KeyCode::I => Some(Message::ChangeTypeFocused(PaneType::Info)),
+            KeyCode::B => Some(Message::ToggleTitleBar),
             _ => None,
         }
     }
@@ -758,7 +954,7 @@ impl PaneType {
                     data.cpu_charts.len()
                 );
                 let width_per_item = (width / (items_per_row as f32)) as u16 - padding;
-                let height_per_item = (width_per_item * 62) / 90;
+                let height_per_item = (width_per_item * 2) / 3;
                 // let max_width = 450;
 
 
@@ -784,9 +980,9 @@ impl PaneType {
                     content = content.push(row);
                 }
 
-                // content.into()
+                content.into()
                 // content.into::<Element<Message, iced::Renderer>>()
-                std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
+                // std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
             }
             PaneType::Memory => {
                 let mut content = column![
@@ -830,7 +1026,7 @@ impl PaneType {
                 // return std::convert::Into::<Element<Message, iced::Renderer>>::into(c).explain(Color::BLACK);
                 
                 let mut content = column![
-                    text("Disks").size(24),
+                    text("Partitions").size(24),
                     row(vec![
                         canvas(ColoredRect { color: USED_COLOR })
                             .width(Length::Units(20))
@@ -880,21 +1076,27 @@ impl PaneType {
                     content = content.push(row);
                 }
 
-                // content.into()
-                std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
+                content.into()
+                // std::convert::Into::<Element<Message, iced::Renderer>>::into(content).explain(Color::BLACK)
             }
             PaneType::Info => {
                 let mut content = column![
                     text("System Info").size(24),
                 ]
                 .width(Length::Fill)
-                .spacing(10)
+                .spacing(5)
                 .align_items(Alignment::Center);
 
+                let mut info_content = column![]
+                .width(Length::Fill)
+                .spacing(0)
+                .align_items(Alignment::Start);
+
                 for line in &data.current_data_copy.extra_infos {
-                    content = content.push(text(line).size(16));
+                    info_content = info_content.push(text(line).size(16));
                 }
-                
+                content = content.push(info_content);
+
                 content.into()
             }
             PaneType::Tasks => {
@@ -978,7 +1180,7 @@ impl Display for PaneType {
                 write!(f, "Memory")
             }
             PaneType::Disks => {
-                write!(f, "Disks")
+                write!(f, "Partitions")
             }
             PaneType::Info => {
                 write!(f, "System information")
@@ -1259,7 +1461,7 @@ impl DiskUsageChart {
         self.cache.clear();
     }
 
-    fn view(&self, idx: usize) -> Element<Message> {
+    fn view(&self, _idx: usize) -> Element<Message> {
         // container(
         //     column(Vec::new())
         //         .width(Length::Fill)
@@ -1282,7 +1484,7 @@ impl DiskUsageChart {
                 .height(Length::Shrink)
                 .spacing(0)
                 .padding(0)
-                .push(text(format!("Disk {} ({}, {})", idx, self.tech, self.capacity)))
+                .push(text(format!("Partition {} ({})", self.tech, self.capacity)))
                 .push(
                     ChartWidget::new(self).height(Length::Fill),
                 )
